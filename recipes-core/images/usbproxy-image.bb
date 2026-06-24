@@ -17,8 +17,9 @@ IMAGE_LINGUAS = ""
 NO_RECOMMENDATIONS = "1"
 
 # Flashable SD-card image (+ bmap for fast flashing). Uses meta-sunxi's default
-# sunxi-sdcard-image.wks.in (single bootable rootfs partition).
-IMAGE_FSTYPES = "wic.gz wic.bmap"
+# sunxi-sdcard-image.wks.in, whose rootfs partition is ext4 — so ext4 must be a
+# built fstype (it also pulls e2fsprogs-native/mkfs.ext4 into the wic step).
+IMAGE_FSTYPES = "ext4 wic.gz wic.bmap"
 
 IMAGE_OVERHEAD_FACTOR = "1.0"
 IMAGE_ROOTFS_EXTRA_SPACE = "4096"
