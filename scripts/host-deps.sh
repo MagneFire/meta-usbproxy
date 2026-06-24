@@ -22,5 +22,12 @@ $SUDO locale-gen
 # when ignorecase is on, producing an empty initial commit and a wiped source
 # tree. Force it off for correct kernel checkout.
 git config --global core.ignorecase false
+
+# OrbStack also enables commit.gpgsign=true globally. kernel-yocto makes an
+# internal "git commit" of the unpacked Linux source; with signing on and no
+# gpg installed, the commit fails ("cannot run gpg" -> "failed to write commit
+# object"), leaving an invalid HEAD and breaking do_patch. Disable signing for
+# these throwaway build-internal commits.
+git config --global commit.gpgsign false
 echo
 echo "Host deps installed. Set 'export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8' in your shell."
