@@ -1,0 +1,7 @@
+# Nothing build-related lives in this repo; builds happen under ~/yocto/usbproxy.
+*.swp
+*~
+/build/
+/tmp/
+/downloads/
+/sstate-cache/
