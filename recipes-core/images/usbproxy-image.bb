@@ -8,6 +8,10 @@ inherit core-image
 IMAGE_FEATURES += "read-only-rootfs"
 IMAGE_FEATURES:remove = "package-management"
 
+# Passwordless root on the serial console for recovery (log in as 'root', no
+# password). These are the granular login tweaks only — NOT full debug-tweaks.
+IMAGE_FEATURES += "empty-root-password allow-empty-password allow-root-login"
+
 # Just enough to boot under BusyBox init, plus the proxy. packagegroup-core-boot
 # pulls busybox init + mdev (via INIT_MANAGER=mdev-busybox), base-files, etc.
 IMAGE_INSTALL = "packagegroup-core-boot usb-proxy"
