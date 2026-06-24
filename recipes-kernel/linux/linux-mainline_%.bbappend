@@ -9,5 +9,6 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
+    file://0002-dts-orangepi-zero-otg-gadget.patch \
     file://usbproxy.cfg \
 "
