@@ -38,10 +38,13 @@ clone meta-openembedded  https://git.openembedded.org/meta-openembedded
 clone meta-arm           https://git.yoctoproject.org/meta-arm
 clone meta-sunxi         https://github.com/linux-sunxi/meta-sunxi
 
-# Initialise the build dir (creates conf/ if absent).
+# Initialise the build dir (creates conf/ if absent). oe-init-build-env trips
+# over `set -u` (it reads unset vars like BBSERVER), so relax it just here.
 cd "$WORK"
+set +u
 # shellcheck disable=SC1091
 source "$LAYERS/poky/oe-init-build-env" "$WORK/build" >/dev/null
+set -u
 
 CONF="$WORK/build/conf"
 
