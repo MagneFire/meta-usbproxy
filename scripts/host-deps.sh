@@ -15,5 +15,12 @@ $SUDO apt-get install -y --no-install-recommends \
 # Yocto requires a UTF-8 locale.
 $SUDO sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
 $SUDO locale-gen
+
+# OrbStack ships git with core.ignorecase=true by default. The filesystem is
+# actually case-sensitive, and kernel-yocto's `git add` of the Linux source
+# trips over case-only-differing headers (e.g. xt_connmark.h vs xt_CONNMARK.h)
+# when ignorecase is on, producing an empty initial commit and a wiped source
+# tree. Force it off for correct kernel checkout.
+git config --global core.ignorecase false
 echo
 echo "Host deps installed. Set 'export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8' in your shell."
