@@ -3,6 +3,10 @@
 # systemd unit + Restart=always + udev rule). On each invocation it picks up the
 # current UDC and proxies whatever USB device is attached; when the device is
 # unplugged or usb-proxy exits, init simply respawns us.
+#
+# Status lines go to stdout (the serial console, under BusyBox init) AND the
+# logfile, so you can see what it's doing without logging in. usb-proxy's own
+# (verbose) output goes to the logfile only, to avoid flooding the console.
 set -u
 
 CONF_DIR=/etc/usb-proxy
@@ -10,17 +14,20 @@ LOG_DIR=/var/volatile/log
 LOG="$LOG_DIR/usb-proxy.log"
 mkdir -p "$LOG_DIR"
 
+say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
+
 # Auto-detect the USB device controller. On mainline sunxi this is
-# musb-hdrc.<n>.auto; don't hardcode the instance number.
+# musb-hdrc.<n>.auto; don't hardcode the instance number. On dual-role sunxi
+# musb the UDC typically appears only once the OTG port is cabled to a host.
 udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
 if [ -z "$udc" ]; then
-    echo "[usb-proxy-run] no UDC under /sys/class/udc yet; waiting" >> "$LOG"
+    say "no UDC under /sys/class/udc yet (connect the OTG port to a USB host?); retrying"
     sleep 2
     exit 0
 fi
 
 cd "$CONF_DIR" || exit 1
-echo "[usb-proxy-run] starting on UDC $udc" >> "$LOG"
+say "starting usb-proxy on UDC $udc (logging to $LOG)"
 
 # --driver musb-hdrc enables the sunxi-musb-specific code paths in usb-proxy.
 # config.json (reset_device_before_proxy=false) is read from CONF_DIR.
