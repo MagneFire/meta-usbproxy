@@ -30,7 +30,7 @@ conf/distro/usbproxy.conf               the "usbproxy" distro (mdev-busybox, tri
 recipes-core/images/usbproxy-image.bb   the read-only appliance image
 recipes-apps/usb-proxy/                  usb-proxy recipe + launcher + config.json
 recipes-kernel/linux/                    musb patch + kernel config fragment (bbappend)
-recipes-core/busybox/                    custom /etc/inittab (bbappend)
+recipes-core/busybox-inittab/            adds the usb-proxy respawn line to /etc/inittab (bbappend)
 recipes-bsp/u-boot/                      bootdelay=0 + no-USB-boot fragment (bbappend)
 scripts/host-deps.sh                     install Yocto build deps (Debian/Ubuntu)
 scripts/setup-build.sh                   clone layers @scarthgap + write build conf
