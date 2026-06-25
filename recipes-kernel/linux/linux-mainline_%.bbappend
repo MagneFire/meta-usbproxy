@@ -10,5 +10,6 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-dts-orangepi-zero-otg-gadget.patch \
+    file://0003-phy-sun4i-usb-force-peripheral.patch \
     file://usbproxy.cfg \
 "
