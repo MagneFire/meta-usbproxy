@@ -22,5 +22,6 @@ SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
     file://0003-dts-orangepi-zero-release-phy0-from-ehci0-ohci0.patch \
+    file://0004-dts-orangepi-zero-disable-wifi-ethernet.patch \
     file://usbproxy.cfg \
 "
