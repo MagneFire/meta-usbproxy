@@ -1,19 +1,17 @@
 #!/bin/sh
-# usb-proxy appliance supervisor — respawned by /etc/inittab.
+# usb-proxy appliance launcher — respawned by /etc/inittab.
 #
-# usb-proxy binds to whatever USB device is attached at start and doesn't pick
-# up a different device if it's unplugged/replugged (upstream relied on a udev
-# rule to restart it; there's no udev here). This script runs usb-proxy and
-# restarts it when the set of attached (non-hub) USB devices changes.
+# This stays deliberately simple: it execs usb-proxy so usb-proxy IS the
+# inittab-tracked process (exactly one instance, no orphans). usb-proxy already
+# handles device disconnect itself — its libusb hotplug callback fires on
+# DEVICE_LEFT and SIGINTs the process — so on unplug it exits and inittab
+# respawns us, which re-proxies whatever is attached on replug. This mirrors
+# Armbian's systemd "Restart=always" model; no supervisor/restart logic here
+# (an earlier background-supervisor version orphaned instances and wedged the
+# UDC with "couldn't find an available UDC or it's busy").
 #
-# It also debounces: events like "adb reboot bootloader" make the device flap
-# (adb -> fastboot) several times in a second, so we wait for the device set to
-# settle before (re)starting, and we wait for the old usb-proxy to fully exit
-# (releasing /dev/raw-gadget and the UDC) before respawning — otherwise the new
-# instance hits "raw-gadget: couldn't find an available UDC or it's busy".
-#
-# Status goes to stdout (serial console under BusyBox init) and the logfile;
-# usb-proxy's own output goes to the logfile only.
+# Status lines go to stdout (serial console under BusyBox init) and the
+# logfile; usb-proxy's own output goes to the logfile only.
 set -u
 
 CONF_DIR=/etc/usb-proxy
@@ -23,28 +21,7 @@ mkdir -p "$LOG_DIR"
 
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
 
-# Signature of attached host-side USB devices, excluding hubs (class 09). The
-# gadget UDC is separate (/sys/class/udc) and not counted here.
-devsig() {
-    for d in /sys/bus/usb/devices/*/idVendor; do
-        [ -e "$d" ] || continue
-        dir=$(dirname "$d")
-        [ "$(cat "$dir/bDeviceClass" 2>/dev/null)" = "09" ] && continue
-        echo "$(cat "$dir/idVendor"):$(cat "$dir/idProduct")"
-    done | sort | tr '\n' ' '
-}
-
-# Block until the device set is unchanged for ~1.5s, then echo it.
-settle() {
-    local prev="" cur="" stable=0
-    while [ "$stable" -lt 3 ]; do
-        cur=$(devsig)
-        if [ "$cur" = "$prev" ]; then stable=$((stable + 1)); else stable=0; prev="$cur"; fi
-        sleep 0.5
-    done
-    printf '%s' "$prev"
-}
-
+# Need a UDC (gadget controller) to proxy onto.
 udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
 if [ -z "$udc" ]; then
     say "no UDC under /sys/class/udc yet; retrying"
@@ -52,38 +29,28 @@ if [ -z "$udc" ]; then
     exit 0
 fi
 
-sig=$(settle)
-if [ -z "$sig" ]; then
+# Need a (non-hub) USB device to proxy; otherwise wait and let init respawn us
+# (avoids a tight respawn loop when nothing is attached).
+have_dev=
+for d in /sys/bus/usb/devices/*/idVendor; do
+    [ -e "$d" ] || continue
+    [ "$(cat "$(dirname "$d")/bDeviceClass" 2>/dev/null)" = "09" ] && continue
+    have_dev=1
+    break
+done
+if [ -z "$have_dev" ]; then
     say "no USB device attached to proxy yet; waiting"
     sleep 2
     exit 0
 fi
 
 cd "$CONF_DIR" || exit 1
-say "starting usb-proxy on UDC $udc (proxied devices: $sig)"
-/usr/bin/usb-proxy \
+say "exec usb-proxy on UDC $udc"
+
+# exec: replace the shell so usb-proxy is the respawned process. On device
+# disconnect it exits and inittab respawns us.
+exec /usr/bin/usb-proxy \
     --device "$udc" \
     --driver musb-hdrc \
     --enable_customized_config \
-    --auto_remap_endpoints >> "$LOG" 2>&1 &
-pid=$!
-
-# Restart when usb-proxy dies, or when the attached USB device set changes.
-while kill -0 "$pid" 2>/dev/null; do
-    sleep 1
-    if [ "$(devsig)" != "$sig" ]; then
-        say "USB device set changed; stopping usb-proxy"
-        kill "$pid" 2>/dev/null
-        # Wait for a clean exit so /dev/raw-gadget and the UDC are released
-        # before init respawns us (avoids the UDC-busy race).
-        i=0
-        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.3; i=$((i + 1)); done
-        kill -9 "$pid" 2>/dev/null
-        wait "$pid" 2>/dev/null
-        sleep 1   # let the kernel finish unbinding the gadget
-        break
-    fi
-done
-
-# Proxy exited or device changed -> inittab respawns us (which re-settles).
-exit 0
+    --auto_remap_endpoints >> "$LOG" 2>&1
