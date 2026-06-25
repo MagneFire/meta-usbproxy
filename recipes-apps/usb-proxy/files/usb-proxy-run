@@ -1,12 +1,14 @@
 #!/bin/sh
-# usb-proxy appliance launcher — respawned by /etc/inittab (replaces the old
-# systemd unit + Restart=always + udev rule). On each invocation it picks up the
-# current UDC and proxies whatever USB device is attached; when the device is
-# unplugged or usb-proxy exits, init simply respawns us.
+# usb-proxy appliance supervisor — respawned by /etc/inittab.
 #
-# Status lines go to stdout (the serial console, under BusyBox init) AND the
-# logfile, so you can see what it's doing without logging in. usb-proxy's own
-# (verbose) output goes to the logfile only, to avoid flooding the console.
+# usb-proxy binds to whatever USB device is attached at start and does NOT pick
+# up a different device if the original is unplugged/replugged (upstream relied
+# on a udev rule to restart it). There's no udev here, so this script runs
+# usb-proxy and restarts it whenever the set of attached (non-hub) USB devices
+# changes — covering plug/replug/unplug of the proxied device.
+#
+# Status goes to stdout (serial console under BusyBox init) and the logfile;
+# usb-proxy's own output goes to the logfile only.
 set -u
 
 CONF_DIR=/etc/usb-proxy
@@ -16,23 +18,54 @@ mkdir -p "$LOG_DIR"
 
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
 
-# Auto-detect the USB device controller. On mainline sunxi this is
-# musb-hdrc.<n>.auto; don't hardcode the instance number. On dual-role sunxi
-# musb the UDC typically appears only once the OTG port is cabled to a host.
+# Signature of currently-attached host-side USB devices, excluding hubs
+# (bDeviceClass 09). This is the device usb-proxy proxies; the gadget UDC is
+# separate (/sys/class/udc) and not counted here.
+devsig() {
+    for d in /sys/bus/usb/devices/*/idVendor; do
+        [ -e "$d" ] || continue
+        dir=$(dirname "$d")
+        [ "$(cat "$dir/bDeviceClass" 2>/dev/null)" = "09" ] && continue
+        echo "$(cat "$dir/idVendor"):$(cat "$dir/idProduct")"
+    done | sort | tr '\n' ' '
+}
+
+# Need a UDC (gadget controller) to proxy onto.
 udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
 if [ -z "$udc" ]; then
-    say "no UDC under /sys/class/udc yet (connect the OTG port to a USB host?); retrying"
+    say "no UDC under /sys/class/udc yet; retrying"
+    sleep 2
+    exit 0
+fi
+
+# Need a device to proxy.
+sig=$(devsig)
+if [ -z "$sig" ]; then
+    say "no USB device attached to proxy yet; waiting"
     sleep 2
     exit 0
 fi
 
 cd "$CONF_DIR" || exit 1
-say "starting usb-proxy on UDC $udc (logging to $LOG)"
-
-# --driver musb-hdrc enables the sunxi-musb-specific code paths in usb-proxy.
-# config.json (reset_device_before_proxy=false) is read from CONF_DIR.
-exec /usr/bin/usb-proxy \
+say "starting usb-proxy on UDC $udc (proxied devices: $sig)"
+/usr/bin/usb-proxy \
     --device "$udc" \
     --driver musb-hdrc \
     --enable_customized_config \
-    --auto_remap_endpoints >> "$LOG" 2>&1
+    --auto_remap_endpoints >> "$LOG" 2>&1 &
+pid=$!
+
+# Restart when usb-proxy dies, or when the attached USB device set changes.
+while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    if [ "$(devsig)" != "$sig" ]; then
+        say "USB device set changed; restarting usb-proxy"
+        kill "$pid" 2>/dev/null
+        sleep 1
+        kill -9 "$pid" 2>/dev/null
+        break
+    fi
+done
+
+# Falling out (proxy exited or device changed) -> inittab respawns us.
+exit 0
