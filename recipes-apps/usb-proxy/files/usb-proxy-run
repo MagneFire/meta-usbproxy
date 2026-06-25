@@ -1,11 +1,16 @@
 #!/bin/sh
 # usb-proxy appliance supervisor — respawned by /etc/inittab.
 #
-# usb-proxy binds to whatever USB device is attached at start and does NOT pick
-# up a different device if the original is unplugged/replugged (upstream relied
-# on a udev rule to restart it). There's no udev here, so this script runs
-# usb-proxy and restarts it whenever the set of attached (non-hub) USB devices
-# changes — covering plug/replug/unplug of the proxied device.
+# usb-proxy binds to whatever USB device is attached at start and doesn't pick
+# up a different device if it's unplugged/replugged (upstream relied on a udev
+# rule to restart it; there's no udev here). This script runs usb-proxy and
+# restarts it when the set of attached (non-hub) USB devices changes.
+#
+# It also debounces: events like "adb reboot bootloader" make the device flap
+# (adb -> fastboot) several times in a second, so we wait for the device set to
+# settle before (re)starting, and we wait for the old usb-proxy to fully exit
+# (releasing /dev/raw-gadget and the UDC) before respawning — otherwise the new
+# instance hits "raw-gadget: couldn't find an available UDC or it's busy".
 #
 # Status goes to stdout (serial console under BusyBox init) and the logfile;
 # usb-proxy's own output goes to the logfile only.
@@ -18,9 +23,8 @@ mkdir -p "$LOG_DIR"
 
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
 
-# Signature of currently-attached host-side USB devices, excluding hubs
-# (bDeviceClass 09). This is the device usb-proxy proxies; the gadget UDC is
-# separate (/sys/class/udc) and not counted here.
+# Signature of attached host-side USB devices, excluding hubs (class 09). The
+# gadget UDC is separate (/sys/class/udc) and not counted here.
 devsig() {
     for d in /sys/bus/usb/devices/*/idVendor; do
         [ -e "$d" ] || continue
@@ -30,7 +34,17 @@ devsig() {
     done | sort | tr '\n' ' '
 }
 
-# Need a UDC (gadget controller) to proxy onto.
+# Block until the device set is unchanged for ~1.5s, then echo it.
+settle() {
+    local prev="" cur="" stable=0
+    while [ "$stable" -lt 3 ]; do
+        cur=$(devsig)
+        if [ "$cur" = "$prev" ]; then stable=$((stable + 1)); else stable=0; prev="$cur"; fi
+        sleep 0.5
+    done
+    printf '%s' "$prev"
+}
+
 udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
 if [ -z "$udc" ]; then
     say "no UDC under /sys/class/udc yet; retrying"
@@ -38,8 +52,7 @@ if [ -z "$udc" ]; then
     exit 0
 fi
 
-# Need a device to proxy.
-sig=$(devsig)
+sig=$(settle)
 if [ -z "$sig" ]; then
     say "no USB device attached to proxy yet; waiting"
     sleep 2
@@ -59,13 +72,18 @@ pid=$!
 while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     if [ "$(devsig)" != "$sig" ]; then
-        say "USB device set changed; restarting usb-proxy"
+        say "USB device set changed; stopping usb-proxy"
         kill "$pid" 2>/dev/null
-        sleep 1
+        # Wait for a clean exit so /dev/raw-gadget and the UDC are released
+        # before init respawns us (avoids the UDC-busy race).
+        i=0
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.3; i=$((i + 1)); done
         kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+        sleep 1   # let the kernel finish unbinding the gadget
         break
     fi
 done
 
-# Falling out (proxy exited or device changed) -> inittab respawns us.
+# Proxy exited or device changed -> inittab respawns us (which re-settles).
 exit 0
