@@ -9,6 +9,7 @@ LIC_FILES_CHKSUM = "file://LICENSE;md5=86d3f3a95c324c9479bd8986968f4327"
 DEPENDS = "libusb1 jsoncpp"
 
 SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
+           file://0001-usb-proxy-exit-on-nodevice.patch \
            file://config.json \
            file://usb-proxy-run \
 "

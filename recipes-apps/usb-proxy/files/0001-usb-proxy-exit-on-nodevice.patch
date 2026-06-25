@@ -1,0 +1,74 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] exit on device disconnect (NO_DEVICE) without relying on udev
+
+usb-proxy only exits on disconnect via its libusb hotplug DEVICE_LEFT
+callback (kill(0,SIGINT)). libusb hotplug does not fire on systems without
+udev (this appliance uses mdev), so on unplug usb-proxy lingers and the host
+keeps a stale gadget. The IN endpoint threads already detect the gone device
+(LIBUSB_ERROR_NO_DEVICE); raise SIGINT there to run the same clean shutdown
+and let init respawn us to re-proxy on replug.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -736,8 +736,13 @@
+ 						       data, length, USB_REQUEST_TIMEOUT);
+ 				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+ 					delete[] data;
+-					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
++					printf("EP%x(%s_%s): device gone, stopping usb-proxy\n",
+ 						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
++					/* libusb hotplug does not fire without udev; the device is
++					 * gone, so trigger the same clean shutdown the hotplug
++					 * callback would (SIGINT) and let the service manager
++					 * respawn us to re-proxy on replug. */
++					kill(0, SIGINT);
+ 					break;
+ 				}
+ 				if (rv != LIBUSB_SUCCESS)
+@@ -747,8 +752,13 @@
+ 						   data, length, USB_REQUEST_TIMEOUT);
+ 				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+ 					delete[] data;
+-					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
++					printf("EP%x(%s_%s): device gone, stopping usb-proxy\n",
+ 						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
++					/* libusb hotplug does not fire without udev; the device is
++					 * gone, so trigger the same clean shutdown the hotplug
++					 * callback would (SIGINT) and let the service manager
++					 * respawn us to re-proxy on replug. */
++					kill(0, SIGINT);
+ 					break;
+ 				}
+ 				delete[] data;
+@@ -799,8 +809,13 @@
+ 								usb_endpoint_maxp(&ep),
+ 								&batch, iso_batch_size, USB_REQUEST_TIMEOUT);
+ 				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+-					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
++					printf("EP%x(%s_%s): device gone, stopping usb-proxy\n",
+ 						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
++					/* libusb hotplug does not fire without udev; the device is
++					 * gone, so trigger the same clean shutdown the hotplug
++					 * callback would (SIGINT) and let the service manager
++					 * respawn us to re-proxy on replug. */
++					kill(0, SIGINT);
+ 					break;
+ 				}
+ 
+@@ -852,8 +867,13 @@
+ 							usb_endpoint_maxp(&ep),
+ 							&data, &nbytes, USB_REQUEST_TIMEOUT);
+ 				if (rv == LIBUSB_ERROR_NO_DEVICE) {
+-					printf("EP%x(%s_%s): device likely reset, stopping thread\n",
++					printf("EP%x(%s_%s): device gone, stopping usb-proxy\n",
+ 						ep.bEndpointAddress, transfer_type.c_str(), dir.c_str());
++					/* libusb hotplug does not fire without udev; the device is
++					 * gone, so trigger the same clean shutdown the hotplug
++					 * callback would (SIGINT) and let the service manager
++					 * respawn us to re-proxy on replug. */
++					kill(0, SIGINT);
+ 					if (data)
+ 						delete[] data;
+ 					break;
