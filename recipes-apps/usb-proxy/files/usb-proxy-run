@@ -23,18 +23,6 @@ mkdir -p "$LOG_DIR"
 
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
 
-# Force the sunxi OTG phy to peripheral via the usb_role_switch (megous kernel
-# patch). Without this the phy reroutes the micro-USB port to the host
-# controller (the ID pin reads as host) and the gadget never enumerates.
-# Idempotent: only write if not already "device" (re-writing re-triggers a phy
-# redetect that would bounce the gadget).
-for r in /sys/class/usb_role/*/role; do
-    [ -e "$r" ] || continue
-    [ "$(cat "$r" 2>/dev/null)" = "device" ] && continue
-    say "forcing OTG role -> device ($r)"
-    echo device > "$r" 2>/dev/null && sleep 1
-done
-
 # Signature of attached host-side USB devices, excluding hubs (class 09). The
 # gadget UDC is separate (/sys/class/udc) and not counted here.
 devsig() {

@@ -1,0 +1,35 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: release PHY0 from ehci0/ohci0 for OTG gadget
+
+On H3 the OTG PHY0 is dual-routed between musb and the ehci0/ohci0 host pair.
+The board enables ehci0/ohci0, which grab PHY0 and force it to host mode, so
+the micro-USB never comes up as a USB gadget. Delete their phys/phy-names so
+PHY0 stays routed to musb (peripheral). This is the fix from armbian/build
+issue #8871.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts	2026-06-25 21:27:11.342175012 +0200
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts	2026-06-25 21:27:11.349696260 +0200
+@@ -125,6 +125,10 @@
+ 
+ &ehci0 {
+ 	status = "okay";
++	/* PHY0 is shared with musb (OTG gadget); release it so the
++	 * micro-USB port stays peripheral instead of being grabbed for host. */
++	/delete-property/ phys;
++	/delete-property/ phy-names;
+ };
+ 
+ &ehci1 {
+@@ -172,6 +176,10 @@
+ 
+ &ohci0 {
+ 	status = "okay";
++	/* PHY0 is shared with musb (OTG gadget); release it so the
++	 * micro-USB port stays peripheral instead of being grabbed for host. */
++	/delete-property/ phys;
++	/delete-property/ phy-names;
+ };
+ 
+ &ohci1 {
