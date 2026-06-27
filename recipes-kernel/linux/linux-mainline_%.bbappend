@@ -24,4 +24,5 @@ SRC_URI:append = " \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
     file://0003-dts-orangepi-zero-appliance-trim.patch \
     file://usbproxy.cfg \
+    file://usbproxy-trim.cfg \
 "
