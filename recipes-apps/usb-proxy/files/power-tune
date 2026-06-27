@@ -1,21 +1,42 @@
 #!/bin/sh
 # One-shot power tuning for the usb-proxy appliance, run once at boot (inittab
 # sysinit), before usb-proxy starts.
-#
+
+# --- CPU: offline spare cores -------------------------------------------------
 # The Allwinner H2+ is a quad Cortex-A7. usb-proxy is USB-I/O-bound (its threads
 # spend their time blocked on USB transfers, not computing), so two cores at the
-# lowest OPP comfortably saturate USB 2.0. Offlining the other two cores removes
-# their static/leakage draw on this always-on device. CPU hotplug is supported
-# on mainline sunxi H3, and the cpufreq governor (schedutil) already idles the
-# remaining cores at the lowest frequency and only bursts up under load.
-#
-# To keep all four cores (e.g. if you ever need more throughput), delete this
-# line from /etc/inittab or empty OFFLINE_CPUS below.
+# lowest OPP comfortably saturate USB 2.0. Offlining the other two removes their
+# static/leakage draw on this always-on device. CPU hotplug is supported on
+# mainline sunxi H3, and schedutil idles the rest at the lowest frequency.
+# To keep all four cores, empty OFFLINE_CPUS.
 OFFLINE_CPUS="2 3"
-
 for c in $OFFLINE_CPUS; do
 	node="/sys/devices/system/cpu/cpu$c/online"
 	[ -w "$node" ] && echo 0 > "$node"
 done
+
+# --- Ethernet: power down the unused internal PHY -----------------------------
+# The H3 internal Ethernet PHY comes up powered at hardware reset (RJ45 LEDs lit,
+# ~150-250mW) and stays on because u-boot leaves its reset deasserted; merely
+# disabling the driver does NOT turn it off. Replicate dwmac-sun8i's unpower:
+# assert RST_BUS_EPHY and gate CLK_BUS_EPHY (plus set the syscon EPHY_SHUTDOWN
+# bit). Those reset/gate bits live in CCU registers shared with other
+# peripherals, so read-modify-write ONLY the EPHY bit in each.
+#   0x01c00030  EMAC-EPHY syscon   H3_EPHY_SHUTDOWN = BIT(16)
+#   0x01c202c8  CCU bus reset      RST_BUS_EPHY     = BIT(2)
+#   0x01c20070  CCU bus gating     CLK_BUS_EPHY     = BIT(0)
+if command -v devmem >/dev/null 2>&1; then
+	rmw() {  # addr set|clear mask
+		v=$(devmem "$1")
+		case "$2" in
+			set)   v=$(( v | $3 )) ;;
+			clear) v=$(( v & ~$3 )) ;;
+		esac
+		devmem "$1" 32 "$(printf '0x%x' "$v")"
+	}
+	rmw 0x01c00030 set   0x10000   # EPHY_SHUTDOWN
+	rmw 0x01c202c8 clear 0x4       # assert EPHY reset
+	rmw 0x01c20070 clear 0x1       # gate EPHY bus clock
+fi
 
 exit 0
