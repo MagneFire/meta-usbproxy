@@ -11,17 +11,17 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    "mode change only in dual role" check that otherwise stopped the phy from
 #    switching to device — this is what makes the micro-USB enumerate as a
 #    gadget (the proper fix for the OTG-stuck-in-host problem).
-#  * 0003-dts-...release-phy0: the actual root-cause fix (armbian/build #8871).
-#    On H3 the OTG PHY0 is dual-routed between musb and the ehci0/ohci0 host
-#    pair; the board enables ehci0/ohci0, which grab PHY0 and force host mode.
-#    Deleting their phys/phy-names releases PHY0 to musb so the micro-USB comes
-#    up as a gadget. dr_mode stays "peripheral" (mainline default).
+#  * 0003-dts-...appliance-trim: disable the blocks this appliance never uses.
+#    ehci0/ohci0 are the OTG host companion on the shared PHY0; the board
+#    enables them and they grab PHY0 and force host mode (armbian/build #8871).
+#    Disabling them releases PHY0 to musb so the micro-USB enumerates as a
+#    gadget (dr_mode stays "peripheral") AND skips their probe/USB enumeration,
+#    trimming kernel boot. Also disables mmc1 (XR819 wifi) and emac (ethernet).
 #  * usbproxy.cfg: build raw_gadget and the musb gadget stack into the kernel
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
-    file://0003-dts-orangepi-zero-release-phy0-from-ehci0-ohci0.patch \
-    file://0004-dts-orangepi-zero-disable-wifi-ethernet.patch \
+    file://0003-dts-orangepi-zero-appliance-trim.patch \
     file://usbproxy.cfg \
 "

@@ -1,0 +1,54 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: appliance trim - disable unused USB-host/wifi/eth
+
+This headless USB-gadget appliance uses only the musb OTG (gadget) and the
+USB-A host port. Disable the unused blocks:
+ - ehci0/ohci0 (OTG host companion on the shared PHY0): disabling releases
+   PHY0 to musb so the gadget enumerates (armbian #8871 root cause) AND skips
+   their probe/enumeration, trimming kernel boot.
+ - mmc1 (XR819 SDIO wifi) and emac (ethernet): unused.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts	2026-06-27 14:31:46.167330903 +0200
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts	2026-06-27 14:31:46.176197749 +0200
+@@ -124,7 +124,9 @@
+ };
+ 
+ &ehci0 {
+-	status = "okay";
++	/* OTG host companion (PHY0): unused - the OTG port is the musb
++	 * gadget. Disabling releases PHY0 to musb and trims USB boot time. */
++	status = "disabled";
+ };
+ 
+ &ehci1 {
+@@ -135,7 +137,8 @@
+ 	phy-handle = <&int_mii_phy>;
+ 	phy-mode = "mii";
+ 	allwinner,leds-active-low;
+-	status = "okay";
++	/* ethernet unused on this appliance */
++	status = "disabled";
+ };
+ 
+ &mmc0 {
+@@ -152,7 +155,8 @@
+ 	bus-width = <4>;
+ 	max-frequency = <16000000>;
+ 	non-removable;
+-	status = "okay";
++	/* wifi unused; disabling removes its SDIO init at boot */
++	status = "disabled";
+ 
+ 	/*
+ 	 * Explicitly define the sdio device, so that we can add an ethernet
+@@ -171,7 +175,7 @@
+ };
+ 
+ &ohci0 {
+-	status = "okay";
++	status = "disabled";
+ };
+ 
+ &ohci1 {
