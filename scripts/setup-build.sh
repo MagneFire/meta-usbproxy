@@ -92,6 +92,12 @@ PACKAGE_CLASSES = "package_ipk"
 USER_CLASSES ?= "buildstats"
 CONF_VERSION = "2"
 
+# Conserve disk: delete each recipe's WORKDIR once it has finished building.
+# Exclude the initramfs image so the kernel's INITRAMFS_IMAGE_BUNDLE step can
+# still read its rootfs/cpio when bundling it into the uImage.
+INHERIT += "rm_work"
+RM_WORK_EXCLUDE += "usbproxy-initramfs"
+
 # Accept meta-sunxi's GPU/firmware licences if pulled in transitively.
 LICENSE_FLAGS_ACCEPTED = "synaptics-killswitch"
 EOF
