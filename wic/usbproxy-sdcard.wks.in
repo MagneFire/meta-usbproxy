@@ -1,0 +1,5 @@
+# usb-proxy appliance SD layout: u-boot SPL + a FAT boot partition only.
+# The root filesystem is the initramfs bundled into the kernel (runs from RAM),
+# so there is NO rootfs partition — nothing on the card is written at runtime.
+part u-boot --source rawcopy --sourceparams="file=${SPL_BINARY}" --ondisk mmcblk0 --no-table --align 8
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 2048 --fixed-size ${SUNXI_BOOT_SPACE}

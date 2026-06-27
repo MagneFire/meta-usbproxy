@@ -82,6 +82,11 @@ PARALLEL_MAKE = "-j 8"
 # Appliance output: flashable SD image.
 IMAGE_FSTYPES = "wic.gz wic.bmap"
 
+# Bundle the appliance root filesystem into the kernel as an initramfs (runs
+# from RAM; no rootfs partition). Build target is usbproxy-image (the SD image).
+INITRAMFS_IMAGE = "usbproxy-initramfs"
+INITRAMFS_IMAGE_BUNDLE = "1"
+
 # No package manager, no SDK machine bloat.
 PACKAGE_CLASSES = "package_ipk"
 USER_CLASSES ?= "buildstats"

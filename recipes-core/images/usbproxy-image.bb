@@ -1,29 +1,24 @@
-SUMMARY = "Minimal read-only USB-proxy appliance image for Orange Pi Zero"
+SUMMARY = "USB-proxy appliance SD image — u-boot + initramfs-bundled kernel, no rootfs partition"
 LICENSE = "GPL-3.0-only"
 
 inherit core-image
 
-# read-only rootfs: nothing persists, power-loss safe. Writable runtime dirs
-# (/var/volatile etc.) are overlaid on tmpfs by initscripts' volatile handling.
-IMAGE_FEATURES += "read-only-rootfs"
-IMAGE_FEATURES:remove = "package-management"
-
-# Passwordless root on the serial console for recovery (log in as 'root', no
-# password). These are the granular login tweaks only — NOT full debug-tweaks.
-IMAGE_FEATURES += "empty-root-password allow-empty-password allow-root-login"
-
-# Just enough to boot under BusyBox init, plus the proxy. packagegroup-core-boot
-# pulls busybox init + mdev (via INIT_MANAGER=mdev-busybox), base-files, etc.
-IMAGE_INSTALL = "packagegroup-core-boot usb-proxy"
-
-# Smallest possible: no locales, no recommended-package bloat.
+# The runtime root filesystem is the initramfs (usbproxy-initramfs) bundled into
+# the kernel, so this image lays down ONLY the bootloader + a small FAT boot
+# partition — there is no ext4 rootfs partition. This image's own rootfs is
+# unused (the wks below has no "part /").
+IMAGE_INSTALL = ""
+IMAGE_FEATURES = ""
 IMAGE_LINGUAS = ""
 NO_RECOMMENDATIONS = "1"
 
-# Flashable SD-card image (+ bmap for fast flashing). Uses meta-sunxi's default
-# sunxi-sdcard-image.wks.in, whose rootfs partition is ext4 — so ext4 must be a
-# built fstype (it also pulls e2fsprogs-native/mkfs.ext4 into the wic step).
-IMAGE_FSTYPES = "ext4 wic.gz wic.bmap"
+# Put the *bundled* kernel (uImage with the initramfs inside) on /boot as
+# "uImage" so the stock meta-sunxi boot.scr loads it. The plain uImage has no
+# initramfs, so we must select the .initramfs variant explicitly and rename it.
+IMAGE_BOOT_FILES = "${KERNEL_IMAGETYPE}-initramfs-${MACHINE}.bin;${KERNEL_IMAGETYPE} \
+                    boot.scr \
+                    ${@d.getVar('KERNEL_DEVICETREE','').split('/')[-1]}"
 
-IMAGE_OVERHEAD_FACTOR = "1.0"
-IMAGE_ROOTFS_EXTRA_SPACE = "4096"
+# SD layout: u-boot SPL + FAT /boot only (no rootfs partition).
+WKS_FILE = "usbproxy-sdcard.wks.in"
+IMAGE_FSTYPES = "wic.gz wic.bmap"
