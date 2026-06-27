@@ -11,6 +11,7 @@ DEPENDS = "libusb1 jsoncpp"
 SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
            file://config.json \
            file://usb-proxy-run \
+           file://power-tune \
 "
 # opi branch HEAD (carries the sunxi musb fixes + the NO_DEVICE _exit-on-
 # disconnect fix). Bump to advance.
@@ -41,6 +42,7 @@ do_install() {
     install -d ${D}${bindir}
     install -m 0755 ${S}/usb-proxy        ${D}${bindir}/usb-proxy
     install -m 0755 ${WORKDIR}/usb-proxy-run ${D}${bindir}/usb-proxy-run
+    install -m 0755 ${WORKDIR}/power-tune     ${D}${bindir}/power-tune
 
     install -d ${D}${sysconfdir}/usb-proxy
     install -m 0644 ${WORKDIR}/config.json ${D}${sysconfdir}/usb-proxy/config.json

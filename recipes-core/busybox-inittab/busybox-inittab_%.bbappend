@@ -9,6 +9,8 @@
 USE_VT = "0"
 
 do_install:append() {
+    printf '\n# Appliance power tuning (offline spare CPU cores), run once at boot.\n' >> ${D}${sysconfdir}/inittab
+    printf '::sysinit:/usr/bin/power-tune\n' >> ${D}${sysconfdir}/inittab
     printf '\n# usb-proxy appliance: the single purpose of this device.\n' >> ${D}${sysconfdir}/inittab
     printf '# Respawn on exit covers device unplug/replug and crashes.\n' >> ${D}${sysconfdir}/inittab
     printf '::respawn:/usr/bin/usb-proxy-run\n' >> ${D}${sysconfdir}/inittab
