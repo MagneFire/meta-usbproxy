@@ -18,6 +18,13 @@ IMAGE_LINGUAS = ""
 # INITRAMFS_IMAGE_BUNDLE (which bundles this image into the kernel).
 NO_RECOMMENDATIONS = "1"
 
+# Drop the udev cluster: we use BusyBox mdev (+ devtmpfs), never udevd. eudev
+# also drags in kmod -> libcrypto (OpenSSL, ~2.9MB, for module-sig verify) and
+# libblkid — none of which a USB-gadget proxy that loads no modules needs.
+# (If the rootfs build complains a package hard-depends one of these, that names
+# the real puller to fix at source.)
+PACKAGE_EXCLUDE = "eudev kmod libkmod2"
+
 # Bundled-initramfs deliverable: a single gzipped cpio.
 IMAGE_FSTYPES = "cpio.gz"
 INITRAMFS_MAXSIZE = "262144"
