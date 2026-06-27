@@ -15,28 +15,19 @@ for c in $OFFLINE_CPUS; do
 	[ -w "$node" ] && echo 0 > "$node"
 done
 
-# --- Ethernet: power down the unused internal PHY -----------------------------
-# The H3 internal Ethernet PHY comes up powered at hardware reset (RJ45 LEDs lit,
-# ~150-250mW) and stays on because u-boot leaves its reset deasserted; merely
-# disabling the driver does NOT turn it off. Replicate dwmac-sun8i's unpower:
-# assert RST_BUS_EPHY and gate CLK_BUS_EPHY (plus set the syscon EPHY_SHUTDOWN
-# bit). Those reset/gate bits live in CCU registers shared with other
-# peripherals, so read-modify-write ONLY the EPHY bit in each.
-#   0x01c00030  EMAC-EPHY syscon   H3_EPHY_SHUTDOWN = BIT(16)
-#   0x01c202c8  CCU bus reset      RST_BUS_EPHY     = BIT(2)
-#   0x01c20070  CCU bus gating     CLK_BUS_EPHY     = BIT(0)
+# --- Ethernet: turn off the unused PHY's RJ45 LEDs ----------------------------
+# The H3 internal Ethernet PHY is already at its lowest-power state at boot: its
+# bus clock is gated and it's held in reset by hardware default (verified via the
+# CCU regs), and nothing powers it up (emac is disabled in both u-boot and the
+# kernel). BUT its RJ45 link LEDs stay lit: the board wires them active-low while
+# the EMAC-EPHY syscon register powers up with active-HIGH polarity, pinning the
+# LED outputs on. The polarity bit (H3_EPHY_LED_POL, bit17) lives in the syscon
+# and takes effect even with the PHY gated/in-reset, so setting it makes the idle
+# LED outputs go dark while the PHY stays fully powered down.
+#   0x01c00030  EMAC-EPHY syscon   H3_EPHY_LED_POL = BIT(17)
 if command -v devmem >/dev/null 2>&1; then
-	rmw() {  # addr set|clear mask
-		v=$(devmem "$1")
-		case "$2" in
-			set)   v=$(( v | $3 )) ;;
-			clear) v=$(( v & ~$3 )) ;;
-		esac
-		devmem "$1" 32 "$(printf '0x%x' "$v")"
-	}
-	rmw 0x01c00030 set   0x10000   # EPHY_SHUTDOWN
-	rmw 0x01c202c8 clear 0x4       # assert EPHY reset
-	rmw 0x01c20070 clear 0x1       # gate EPHY bus clock
+	v=$(devmem 0x01c00030)
+	devmem 0x01c00030 32 "$(printf '0x%x' $(( v | 0x20000 )))"
 fi
 
 exit 0
