@@ -21,3 +21,8 @@ NO_RECOMMENDATIONS = "1"
 # Bundled-initramfs deliverable: a single gzipped cpio.
 IMAGE_FSTYPES = "cpio.gz"
 INITRAMFS_MAXSIZE = "262144"
+
+# do_bundle_initramfs looks for ${INITRAMFS_IMAGE}-${MACHINE}.cpio.gz; drop the
+# default ".rootfs" IMAGE_NAME_SUFFIX so the deployed name matches (as Yocto's
+# own *-initramfs images do).
+IMAGE_NAME_SUFFIX = ""
