@@ -20,5 +20,10 @@ IMAGE_BOOT_FILES = "${KERNEL_IMAGETYPE}-initramfs-${MACHINE}.bin;${KERNEL_IMAGET
                     ${@d.getVar('KERNEL_DEVICETREE','').split('/')[-1]}"
 
 # SD layout: u-boot SPL + FAT /boot only (no rootfs partition).
+# NOTE: meta-sunxi's sunxi.inc sets WKS_FILES (plural) which takes precedence
+# over WKS_FILE (singular) in the wic class — so we MUST override WKS_FILES,
+# otherwise the stock sunxi-sdcard-image.wks (boot + ext4 rootfs) is used and we
+# get a dead 80MB rootfs partition we never mount.
+WKS_FILES = "usbproxy-sdcard.wks.in"
 WKS_FILE = "usbproxy-sdcard.wks.in"
 IMAGE_FSTYPES = "wic.gz wic.bmap"
