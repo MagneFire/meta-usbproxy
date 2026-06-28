@@ -1,39 +1,54 @@
 # meta-usbproxy
 
-A minimal, **read-only** Yocto (scarthgap) distro + image that turns an
+A minimal, **stateless** Yocto (scarthgap) distro + image that turns an
 **Orange Pi Zero** (Allwinner H2+/sun8i-h3) into a single-purpose
 [usb-proxy](https://github.com/MagneFire/usb-proxy) appliance. It does one thing:
-run `usb-proxy` on the sunxi musb UDC, as fast as possible after power-on.
+run `usb-proxy` on the sunxi musb UDC, as fast as possible after power-on. The
+whole system runs from a RAM initramfs — nothing is written to the SD at runtime,
+so there's no filesystem to corrupt on power loss.
 
 ## Design
 
-- **No systemd, no udev, no network.** `INIT_MANAGER = "mdev-busybox"`; BusyBox
-  init respawns `usb-proxy` directly from `/etc/inittab`. A serial getty on
-  `ttyS0` (115200) is kept for recovery.
+- **Runs entirely from RAM.** The rootfs is an initramfs *bundled into the kernel*
+  (`INITRAMFS_IMAGE_BUNDLE`); the SD holds only U-Boot + a small FAT `/boot` —
+  **no rootfs partition**, nothing mounted from the card at runtime, power-loss
+  safe. `config.json` is baked in (`reset_device_before_proxy: false`).
+- **No systemd, no udev, no network.** `INIT_MANAGER = "mdev-busybox"` (BusyBox
+  init + mdev + devtmpfs); init respawns `usb-proxy` directly from `/etc/inittab`.
+  A serial getty on `ttyS0` (115200) is kept for recovery.
 - **musb bug fixed in the kernel, not at runtime.** The sunxi musb bulk-OUT
-  packet-loss bug (ADB "offline") is fixed by patching `musb_gadget.c`
-  (`recipes-kernel/linux/files/0001-musb-...patch`) — the in-tree counterpart to
-  the old out-of-tree `musbfix.ko` kprobe. No vermagic fragility, no rebuild on
-  kernel update.
+  packet-loss bug (ADB "offline") is patched into `musb_gadget.c` (`0001-musb-…`)
+  — the in-tree counterpart to the old out-of-tree `musbfix.ko` kprobe. The
+  micro-USB enumerates as a gadget via a DT trim + the megous peripheral-mode
+  patch (`0002`/`0003`). No vermagic fragility.
 - **`raw_gadget` + musb built into the kernel (`=y`)**, so `/dev/raw-gadget`
   exists at boot with nothing to modprobe.
-- **Read-only rootfs** (`read-only-rootfs`); writable runtime dirs are tmpfs.
-  Power-loss safe; `config.json` is baked in (`reset_device_before_proxy: false`).
-- **Fast U-Boot**: `bootdelay=0` and USB/network boot scanning disabled — boots
-  straight from the SD card.
+- **Trimmed kernel.** Single-purpose H3 config drops the IP-stack drivers,
+  wifi/BT, display, audio, media, RAID and on-disk filesystems — ~3.2 MB uImage,
+  0 modules (`usbproxy-trim.cfg`). `CONFIG_NET` core stays because libusb's
+  hotplug uses netlink.
+- **Low power.** A boot-time `power-tune` offlines 2 of the 4 A7 cores and turns
+  off the unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the
+  LEDs just needed the syscon polarity bit).
+- **Fast U-Boot**: `bootdelay=0`, no USB/network boot scan, Ethernet driver
+  dropped — boots straight from the SD card in well under a second.
 
 ## Layout
 
 ```
-conf/layer.conf                         layer definition (scarthgap)
-conf/distro/usbproxy.conf               the "usbproxy" distro (mdev-busybox, trimmed features)
-recipes-core/images/usbproxy-image.bb   the read-only appliance image
-recipes-apps/usb-proxy/                  usb-proxy recipe + launcher + config.json
-recipes-kernel/linux/                    musb patch + kernel config fragment (bbappend)
-recipes-core/busybox-inittab/            adds the usb-proxy respawn line to /etc/inittab (bbappend)
-recipes-bsp/u-boot/                      bootdelay=0 + no-USB-boot fragment (bbappend)
-scripts/host-deps.sh                     install Yocto build deps (Debian/Ubuntu)
-scripts/setup-build.sh                   clone layers @scarthgap + write build conf
+conf/layer.conf                            layer definition (scarthgap)
+conf/distro/usbproxy.conf                  the "usbproxy" distro (mdev-busybox, trimmed features)
+recipes-core/images/usbproxy-initramfs.bb  the RAM rootfs, bundled into the kernel
+recipes-core/images/usbproxy-image.bb      bootable SD image (u-boot + FAT /boot, no rootfs part)
+wic/usbproxy-sdcard.wks.in                 SD layout: u-boot SPL + FAT /boot only
+recipes-apps/usb-proxy/                     usb-proxy recipe + launcher + power-tune + config.json
+recipes-kernel/linux/                       musb/DT patches + kernel config + trim fragments (bbappend)
+recipes-bsp/u-boot/                         bootdelay=0, no-USB-boot, no-EMAC, bigger bootm-len (bbappend)
+recipes-core/busybox-inittab/               adds power-tune + usb-proxy respawn to /etc/inittab (bbappend)
+recipes-core/busybox/                       enables the devmem applet used by power-tune (bbappend)
+recipes-support/libusb/                     builds libusb without udev → netlink hotplug (bbappend)
+scripts/host-deps.sh                        install Yocto build deps (Debian/Ubuntu)
+scripts/setup-build.sh                      clone layers @scarthgap + write build conf (+ rm_work)
 ```
 
 The build pulls the usb-proxy source from the MagneFire fork, branch `opi`
