@@ -184,17 +184,39 @@ into the appliance:
 
 ### 5b. Fast dev loop (iterating against the appliance, no fork push)
 
-Build local working-tree edits straight into the image:
+Build local working-tree edits straight into the image without pushing to the
+fork. Two ways — **devtool is the recommended one.**
 
-1. Add a temporary `recipes-apps/usb-proxy/usb-proxy_git.bbappend`:
-   ```
-   SRC_URI = "git:///Users/darrel/Downloads/usb-proxy;protocol=file;branch=opi \
-              file://config.json file://usb-proxy-run file://power-tune"
-   SRCREV = "${AUTOREV}"
-   ```
-2. **Commit** your edit in the usb-proxy repo (AUTOREV builds the branch HEAD, so
-   uncommitted changes are invisible). Then `bitbake usbproxy-image`.
-3. **Remove the bbappend when done** to restore the pinned, reproducible build.
+**devtool (recommended).** Point a Yocto workspace at the local source tree so it
+builds in place — no bbappend to hand-write, no commit needed to advance the
+build (it builds the working tree directly):
+
+```sh
+# In the build env (after oe-init-build-env):
+devtool modify --no-extract usb-proxy /Users/darrel/Downloads/usb-proxy
+# edit the source in /Users/darrel/Downloads/usb-proxy, then:
+bitbake usbproxy-image          # or: devtool build usb-proxy  (recipe only)
+devtool status                  # shows the active workspace recipe
+devtool reset usb-proxy         # when done — restores the pinned build
+```
+
+`--no-extract <path>` makes devtool use the existing tree (an in-tree build; the
+`usb-proxy`/`*.o` artifacts it drops there are already in `.gitignore`). Without
+it, `devtool modify` would *extract a fresh checkout of the recipe's SRC_URI* (the
+GitHub fork at the pinned SRCREV) into `build/workspace/sources/usb-proxy` — i.e.
+*without* your local commits — which is usually not what you want here.
+
+**Temporary bbappend (fallback).** If you can't use devtool, add
+`recipes-apps/usb-proxy/usb-proxy_git.bbappend`:
+```
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+SRC_URI = "git:///Users/darrel/Downloads/usb-proxy;protocol=file;branch=opi \
+           file://config.json file://usb-proxy-run file://power-tune"
+SRCREV = "${AUTOREV}"
+```
+Then **commit** your edit (AUTOREV builds the branch HEAD, so uncommitted changes
+are invisible) and `bitbake usbproxy-image`. **Remove the bbappend when done** to
+restore the pinned, reproducible build.
 
 ### Branches are controller-specific — do not cross them
 
@@ -239,11 +261,31 @@ line). Interactive:
 screen /dev/tty.usbserial-10 115200      # Ctrl-A k to quit
 ```
 
-Scripted (the `/tmp/pi.py` helper pattern — opens the port at 115200, logs in as
-root with an empty password, runs a command, prints output):
+Scripted: use `scripts/pi-serial.py` (in this repo — opens the port at 115200,
+logs in as root with the empty password, runs a command, prints the output). It
+carries an inline uv dependency on `pyserial`, so **run it with uv** — uv builds
+an ephemeral env with pyserial; there is nothing to pip-install (the system
+`python3` does **not** have pyserial):
 
 ```sh
-uv run --with pyserial python3 /tmp/pi.py "<command>"
+cd /Users/darrel/Downloads/meta-usbproxy
+uv run scripts/pi-serial.py "<command>" [read_seconds]
+uv run scripts/pi-serial.py "cat /var/volatile/log/usb-proxy.log"
+
+# device node varies — override the default when needed:
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/pi-serial.py "uptime"
+```
+
+(The script is also marked executable with a `#!/usr/bin/env -S uv run --script`
+shebang, so `./scripts/pi-serial.py "<command>"` works too. It supersedes the old
+throwaway `/tmp/pi.py` / `/tmp/sercmd.py` helpers, which didn't survive a reboot.)
+
+To drop a file onto the appliance without paste/quoting pain, base64 it on the Mac
+and decode on the Pi (no nested quotes to fight):
+
+```sh
+b64=$(base64 < config.json)
+uv run scripts/pi-serial.py "echo $b64 | base64 -d > /etc/usb-proxy/config.json"
 ```
 
 Useful once you're in: `usb-proxy` logs to `/var/volatile/log/usb-proxy.log` (the
