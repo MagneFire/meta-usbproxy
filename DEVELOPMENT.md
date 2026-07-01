@@ -280,13 +280,17 @@ PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/pi-serial.py "uptime"
 shebang, so `./scripts/pi-serial.py "<command>"` works too. It supersedes the old
 throwaway `/tmp/pi.py` / `/tmp/sercmd.py` helpers, which didn't survive a reboot.)
 
-To drop a file onto the appliance without paste/quoting pain, base64 it on the Mac
-and decode on the Pi (no nested quotes to fight):
+To drop a small file (e.g. `config.json`) onto the appliance, use `printf` and
+escape the inner double-quotes for the surrounding shell — busybox in the trimmed
+image has **no `base64` applet** (`base64: not found`), so decode tricks don't work:
 
 ```sh
-b64=$(base64 < config.json)
-uv run scripts/pi-serial.py "echo $b64 | base64 -d > /etc/usb-proxy/config.json"
+uv run scripts/pi-serial.py "printf '%s\n' '{\"reset_device_before_proxy\": false, \"async_bulk_out_in_flight\": 0}' > /etc/usb-proxy/config.json; cat /etc/usb-proxy/config.json"
 ```
+
+To restart the proxy so it re-reads the config, **`kill -9`** it (plain `kill`/SIGTERM
+hits the graceful-shutdown path which can hang on the still-connected host); inittab
+respawns it: `uv run scripts/pi-serial.py "kill -9 \$(pidof usb-proxy)"`.
 
 Useful once you're in: `usb-proxy` logs to `/var/volatile/log/usb-proxy.log` (the
 `usb-proxy-run` launcher) — `tail -f` it to watch the proxy. Default verbosity
@@ -379,12 +383,12 @@ the DRAM-droop issue in §8).
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes
   were dead ends.
 
-**Known limitation — `fastboot boot` does not work through the proxy.** `adb`,
-`fastboot devices`/`getvar`/`continue`, and small transfers all work. A large
-sustained bulk-OUT download (e.g. `fastboot boot <8.7 MB image>`) stalls — ~94% on
-musb, ~96% on dwc2 — and the `boot` command is never forwarded. The musb side drops
-OUT data mid-transfer; the fact that dwc2 also stalls points to a throughput
-ceiling in the proxy's synchronous per-packet forward path. **This is the target of
-the async bulk-OUT rewrite** (see the plan / the `usb-proxy` work). Two userspace
-experiments that *failed*: skipping spurious 0-byte OUT reads (→ freeze) and adding
-OUT-queue backpressure (→ still stalled).
+**Known limitation — large sustained bulk-OUT (`fastboot boot` / big `adb push`)
+stalls.** `adb`, `fastboot devices`/`getvar`/`continue`, and small transfers all
+work; a large sustained bulk-OUT transfer stalls (fastboot ~94%, adb push early)
+and never completes. A full investigation ruled out content corruption, the
+usb-proxy OUT pipeline (sync == async), and ZLP handling, and confirmed the musb
+RX code + single-buffered FIFO are correct — narrowing it to an erratic packet
+drop in the PIO-only sunxi musb path under raw-gadget's per-packet userspace
+round-trip. **See [`MUSB-BULK-OUT.md`](MUSB-BULK-OUT.md)** for the full findings,
+evidence, current code state, diagnostic tooling, and concrete routes to try next.
