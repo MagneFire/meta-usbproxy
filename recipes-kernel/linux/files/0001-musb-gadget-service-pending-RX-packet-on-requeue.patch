@@ -1,33 +1,46 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: usb-proxy appliance <usb-proxy@local>
-Date: Tue, 24 Jun 2026 00:00:00 +0000
-Subject: [PATCH] musb: gadget: service pending RX packet on requeue instead of
- flushing
+Date: Thu, 2 Jul 2026 00:00:00 +0000
+Subject: [PATCH] musb: gadget: never flush the RX FIFO on OUT requeue;
+ service a pending packet instead
 
-musb_ep_restart() flushes the RX FIFO whenever an OUT request becomes the
-head of the queue. If a packet has already been received into the FIFO before
-the request was queued -- which happens with gadget drivers that re-queue OUT
-requests outside completion context (e.g. raw-gadget servicing reads from user
-space), leaving a brief window with no request pending -- that packet is
-silently discarded. The host already had it ACKed, so it never resends, and the
-transfer deadlocks. On single-buffered PIO controllers (Allwinner sunxi) this
-reliably breaks bulk-OUT streams (e.g. the ADB CNXN payload, leaving the device
-"offline"); double-buffered/large-FIFO controllers (dwc2/dwc3) happen to hide
-it.
+musb_ep_restart() unconditionally wrote FLUSHFIFO whenever an OUT request
+became the head of the queue. That is wrong twice over for gadget drivers
+that requeue OUT requests outside completion context (raw-gadget servicing
+reads from user space), where this path runs for every single packet:
 
-Service an already-pending packet (RXPKTRDY) via rxstate() instead of flushing.
+ 1. If a packet was already received into the FIFO before the request was
+    queued (RXPKTRDY set), the flush silently discards data the host had
+    ACKed; the host never resends it and the transfer deadlocks. This broke
+    the ADB CNXN payload (device stuck "offline") on single-buffered PIO
+    controllers (Allwinner sunxi). Fix: service the packet via rxstate().
 
-This is the proper in-tree counterpart to the out-of-tree musbfix.ko kprobe
-workaround; baking it into the kernel removes the vermagic fragility entirely.
+ 2. Even with RXPKTRDY clear there is nothing to flush -- and per the MUSB
+    programming guide FLUSHFIFO is only valid while RXPKTRDY is set. The
+    flush races a packet in mid-reception: the ACKed packet is either lost
+    outright (it landed between the RXCSR read and the flush write) or
+    delivered as a phantom zero-length packet (RXPKTRDY latches while the
+    FIFO pointer is being reset, so RXCOUNT reads 0). At sustained
+    high-speed bulk-OUT rates this erratically ate one 512-byte packet
+    (observed directly: a WRTE payload delivered as a 0-length read
+    followed by the remaining 7 of 8 packets), deadlocking large adb push
+    and fastboot downloads. Fix: don't touch the FIFO; when the packet
+    completes, the RX interrupt services it.
+
+Double-buffered/large-FIFO controllers (dwc2/dwc3) hide both races.
+
+This replaces the earlier service-pending-packet-only version of this
+patch (which fixed case 1 but kept the case-2 flush) and the out-of-tree
+musbfix.ko kprobe workaround before it.
 
 Signed-off-by: usb-proxy appliance <usb-proxy@local>
 ---
- drivers/usb/musb/musb_gadget.c | 18 +++++++++++++++---
- 1 file changed, 15 insertions(+), 3 deletions(-)
+ drivers/usb/musb/musb_gadget.c | 29 ++++++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
 
 --- a/drivers/usb/musb/musb_gadget.c
 +++ b/drivers/usb/musb/musb_gadget.c
-@@ -1179,9 +1179,21 @@
+@@ -1179,9 +1179,29 @@
  		txstate(musb, req);
  	} else {
  		csr = musb_readw(epio, MUSB_RXCSR);
@@ -35,20 +48,28 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 -		musb_writew(epio, MUSB_RXCSR, csr);
 -		musb_writew(epio, MUSB_RXCSR, csr);
 +		/*
-+		 * If a packet already arrived into the FIFO before this request
-+		 * was queued, don't flush it away -- the host already had it
-+		 * ACKed, so flushing silently drops it and stalls the transfer.
-+		 * Service it instead.  This is the in-tree counterpart to the
-+		 * out-of-tree musbfix.ko workaround; required on single-buffered
-+		 * PIO controllers (Allwinner sunxi) for reliable bulk-OUT.
++		 * If a packet already arrived into the FIFO before this
++		 * request was queued, service it instead of flushing it away:
++		 * the host had it ACKed, so flushing silently drops it and
++		 * deadlocks the transfer. Gadget drivers that requeue OUT
++		 * requests outside completion context (raw-gadget servicing
++		 * reads from user space) hit this window on every packet.
++		 *
++		 * With no packet pending there is nothing to flush either --
++		 * per the MUSB programming guide FLUSHFIFO is only valid
++		 * while RXPKTRDY is set. The stock unconditional flush races
++		 * a packet in mid-reception: the ACKed packet is either lost
++		 * outright (it landed between the RXCSR read above and the
++		 * flush write) or delivered as a phantom zero-length packet
++		 * (RXPKTRDY latches while the FIFO pointer is being reset, so
++		 * RXCOUNT reads 0). At sustained bulk-OUT rates this eats one
++		 * packet erratically and deadlocks ADB/fastboot streams on
++		 * single-buffered PIO controllers (Allwinner sunxi). When the
++		 * packet completes, the RX interrupt services it -- the
++		 * requeue path never needs to touch the FIFO.
 +		 */
-+		if (csr & MUSB_RXCSR_RXPKTRDY) {
++		if (csr & MUSB_RXCSR_RXPKTRDY)
 +			rxstate(musb, req);
-+		} else {
-+			csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
-+			musb_writew(epio, MUSB_RXCSR, csr);
-+			musb_writew(epio, MUSB_RXCSR, csr);
-+		}
  	}
  }
  
