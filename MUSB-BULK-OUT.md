@@ -138,5 +138,5 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
 - Kernel `rx-diag` during those runs: only genuine host-ZLP lines (one per
   4096-byte WRTE, rate-limited, csr 0003), zero OVERRUN/INCOMPRX, zero
   `[outdev]`, all 640 sync DATA chunks complete.
-- `fastboot boot` re-test on the fixed image: pending (needs the device in
-  fastboot mode; expected fixed — same bulk-OUT path).
+- `fastboot boot` re-test on the fixed release image: **confirmed working**
+  (user, 2026-07-02) — the historical ~94% download stall is gone.
