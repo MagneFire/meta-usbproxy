@@ -141,6 +141,36 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
 - `fastboot boot` re-test on the fixed release image: **confirmed working**
   (user, 2026-07-02) — the historical ~94% download stall is gone.
 
+### Throughput tuning (2026-07-02, after the fix)
+
+On-device A/B (10 MB pushes, md5-verified every step):
+
+| Config | Throughput |
+|---|---|
+| sync, one-packet reads (old default) | 1.0–1.4 MB/s |
+| log redirected to /dev/null (spam theory) | no change |
+| `async_bulk_out_in_flight: 8` | 2.9 MB/s |
+| `async_bulk_out_in_flight: 16` | 3.1 MB/s |
+| + `musb_out_read_packets: 8` (4 KB gadget reads) | 3.0 MB/s (50 MB: 2.5 MB/s) |
+
+Findings:
+- The old bottleneck was the synchronous per-packet device-side forward
+  (~420 µs per 512 B packet). Async in-flight URBs fix that; baked default is
+  now 16.
+- Multi-packet gadget reads (`musb_out_read_packets: 8`, safe now that the
+  requeue-flush is fixed — the old "multi-packet buffers stall" symptom was
+  almost certainly that same bug) cut ioctls ~3.3× per WRTE (4096+ZLP+header =
+  3 reads instead of 10). Throughput is unchanged because the ceiling moved to
+  **ADB's own flow control**: one outstanding 4096-byte WRTE per stream × the
+  proxy's ~1.3 ms round trip ≈ 3 MB/s (direct-to-Mac RTT ~0.45 ms ≈ 9 MB/s).
+  Kept for the CPU/syscall reduction on the 648 MHz appliance.
+- Pushing past ~3 MB/s would need RTT reduction (e.g. the 100 µs sleep-poll
+  handoffs between the read/write threads) or ADB burst/delayed-ack mode —
+  diminishing returns, not pursued.
+- Multi-packet reads also passed the historical regression: ADB CNXN
+  handshake + enumeration fine (the original failure mode that motivated the
+  one-packet clamp).
+
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 
 The fix would benefit any gadget driver that requeues OUT requests outside

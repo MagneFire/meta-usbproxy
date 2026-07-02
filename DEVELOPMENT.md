@@ -133,6 +133,7 @@ test, not for producing the target binary.
 | `--auto_remap_endpoints` | remap descriptors/endpoints to UDC limits |
 | `--iso_batch_size <N>` | ISO packets per transfer (1–32, default 8) |
 | `--adb_bulk_diag` | opt-in ADB/file-sync bulk-OUT diagnostic logging |
+| `--musb_out_read_packets <N>` | bulk-OUT packets per gadget read on musb (default 1; >1 needs the kernel requeue-flush fix) |
 
 The appliance launcher (`usb-proxy-run`) auto-detects the UDC and runs:
 
@@ -144,7 +145,8 @@ usb-proxy --device "$udc" --driver musb-hdrc \
 `config.json` (baked into the image) has these keys:
 
 ```json
-{ "reset_device_before_proxy": false, "bmaxpacketsize0_must_greater_than_64": true, "adb_bulk_diag": false }
+{ "reset_device_before_proxy": false, "bmaxpacketsize0_must_greater_than_64": true,
+  "adb_bulk_diag": false, "async_bulk_out_in_flight": 16, "musb_out_read_packets": 8 }
 ```
 
 `reset_device_before_proxy` is **false on purpose** — a USB reset causes
