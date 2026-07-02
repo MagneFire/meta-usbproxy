@@ -106,15 +106,16 @@ limitation, now backed by direct measurement rather than assumption.
 
 ## 6. Potential routes to try (roughly by effort / likelihood)
 
-### A. Decisive drop-detection diagnostic *(do this first if resuming)*
-Prove **where** the packet is lost before attempting any fix. Push the all-`0xAA`
-pattern and add a stateful diagnostic that parses the ADB sync protocol on the OUT
-stream: on each `"DATA"`+`<len>` chunk header, count the `0xAA` payload bytes that
-actually arrive before the next header. A shortfall = an **OUT drop** (and by how
-much / where); a complete count that still stalls = the loss is on the **IN/ack
-path**. Restore unbuffered stdout (`setvbuf(stdout, NULL, _IONBF, 0)`) for live
-logging first — the log is otherwise block-buffered and lags during a stall.
-Cost: 1 reflash. Outcome: turns "somewhere" into a specific, targetable location.
+### A. Decisive drop-detection diagnostic *(implemented; run this first)*
+Prove **where** the packet is lost before attempting any fix. Enable
+`adb_bulk_diag`, push an all-`0xAA` pattern, and watch the stateful diagnostic
+that parses ADB WRTE payloads and the file-sync stream on the OUT path. On each
+`"DATA"`+`<len>` chunk, it counts the `0xAA` payload bytes that actually arrive.
+A `[adbdiag] DATA ... short/non-aa ... remaining=...` line = an **OUT drop** (and
+by how much / where); complete DATA chunks followed by a stall = the loss is on
+the **IN/ack path**. stdout/stderr are now unbuffered at startup so the log is
+live during a stall. Outcome: turns "somewhere" into a specific, targetable
+location.
 
 ### B. Kernel musb driver work (once the drop is located)
 - **RX interrupt / requeue timing.** Study the interaction of the `0001` patch
@@ -159,6 +160,9 @@ on sunxi musb and stop. (This file is that documentation.)
   (device-poll results; `rv=-7` = timeout = device not acking).
 - **Content-capture pattern**: push an all-`0xAA` file; a per-read non-`0xAA`
   counter cleanly separates real payload from corruption without offset math.
+- **`adb_bulk_diag`** (opt-in): parses ADB WRTE/file-sync DATA chunks across bulk
+  OUT reads and logs DATA completions or short/non-`0xAA` shortfalls for the
+  all-`0xAA` push diagnostic.
 - **`scripts/pi-serial.py`** (uv-run): drive the serial console from the Mac
   (`uv run scripts/pi-serial.py "<cmd>"`); RAM rootfs is writable so config.json
   can be edited on-device and the proxy restarted (`kill -9 $(pidof usb-proxy)`;
