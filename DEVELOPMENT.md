@@ -384,12 +384,12 @@ the DRAM-droop issue in §8).
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes
   were dead ends.
 
-**Known limitation — large sustained bulk-OUT (`fastboot boot` / big `adb push`)
-stalls.** `adb`, `fastboot devices`/`getvar`/`continue`, and small transfers all
-work; a large sustained bulk-OUT transfer stalls (fastboot ~94%, adb push early)
-and never completes. A full investigation ruled out content corruption, the
-usb-proxy OUT pipeline (sync == async), and ZLP handling, and confirmed the musb
-RX code + single-buffered FIFO are correct — narrowing it to an erratic packet
-drop in the PIO-only sunxi musb path under raw-gadget's per-packet userspace
-round-trip. **See [`MUSB-BULK-OUT.md`](MUSB-BULK-OUT.md)** for the full findings,
-evidence, current code state, diagnostic tooling, and concrete routes to try next.
+**Large sustained bulk-OUT (`fastboot boot` / big `adb push`) — FIXED
+(2026-07-02).** These used to stall erratically (fastboot ~94%, adb push at
+10–100 KB). Root cause: stock `musb_ep_restart()` wrote FLUSHFIFO on every OUT
+requeue; racing a packet in mid-reception it erratically destroyed one ACKed
+packet (delivered as a phantom ZLP), deadlocking length-framed streams. Kernel
+patch `0001` (v2) removes the flush entirely. Verified: repeated 10–50 MB
+pushes complete md5-exact at ~1.2 MB/s. **See
+[`MUSB-BULK-OUT.md`](MUSB-BULK-OUT.md)** for the investigation record, the
+evidence, and the diagnostic tooling (`adb_bulk_diag`) that found it.

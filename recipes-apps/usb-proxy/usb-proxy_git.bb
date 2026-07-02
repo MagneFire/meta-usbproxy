@@ -15,7 +15,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 "
 # opi branch HEAD (carries the sunxi musb fixes + the NO_DEVICE _exit-on-
 # disconnect fix). Bump to advance.
-SRCREV = "28cd3a622305fe01fba847eaa0c483254bee0201"
+SRCREV = "ce92f49975e32ee38bdf3b008b805a901904aaa7"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
