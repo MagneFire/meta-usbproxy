@@ -140,3 +140,50 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
   `[outdev]`, all 640 sync DATA chunks complete.
 - `fastboot boot` re-test on the fixed release image: **confirmed working**
   (user, 2026-07-02) — the historical ~94% download stall is gone.
+
+## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
+
+The fix would benefit any gadget driver that requeues OUT requests outside
+completion context (raw-gadget, likely f_fs/aio patterns) on single-buffered
+PIO musb hardware. Everything needed to argue the case is in §§2–3 and §7 of
+this file; what remains is submission mechanics and one afternoon of
+archaeology:
+
+1. **Real Signed-off-by.** The patch carries a placeholder
+   (`usb-proxy appliance <usb-proxy@local>`); DCO requires a real name+email.
+2. **Rebase onto current mainline and re-test.** Ours is against 6.6.85. The
+   region is old and stable so it likely applies unchanged, but verify build
+   on `master` and ideally rerun the on-device test with a mainline-ish
+   kernel. Target `drivers/usb/musb/musb_gadget.c`, maintainer via
+   `get_maintainer.pl` (linux-usb@vger.kernel.org).
+3. **Prior-art archaeology (expect this question first):** "the flush has
+   been there for ages — what breaks without it?" Run
+   `git log -L :musb_ep_restart:drivers/usb/musb/musb_gadget.c` in a full
+   clone to find the commit that introduced the flush, and search the
+   linux-usb archives (lore.kernel.org) for its rationale. Our answer: with
+   RXPKTRDY clear there is nothing to flush; with RXPKTRDY set the packet is
+   now *serviced*, which matches what a completion-context requeue does — but
+   citing the original intent preempts the thread. This also yields the
+   `Fixes:` tag; add `Cc: stable@vger.kernel.org` if backports are wanted.
+4. **Exact spec citation.** The commit message paraphrases "FLUSHFIFO is only
+   valid while RXPKTRDY is set". Quote the Mentor MUSBMHDRC Programmer's
+   Guide RXCSR FlushFIFO bit description verbatim, with register/section
+   name, in the commit message.
+5. **Self-contained reproducer paragraph** for the commit message /
+   cover letter: any Allwinner (sunxi) board in peripheral mode + raw-gadget
+   forwarding bulk OUT one packet per request (e.g.
+   github.com/MagneFire/usb-proxy, `opi` branch) + a large `adb push` (or any
+   sustained bulk-OUT stream) through it; stalls within ~100 KB, reproduces
+   100% within a few MB. Direct connection (no proxy) is clean, which
+   isolates the gadget path.
+6. **Delineate observation vs inference.** Directly observed: a real
+   512-byte packet given back as a 0-length request (RXPKTRDY set,
+   RXCOUNT==0) immediately after a requeue, mid-payload where a host ZLP is
+   protocol-impossible (§3). Inferred from the spec: the mechanism being the
+   FIFO pointer reset racing packet reception. Keep that line explicit —
+   a reviewer with silicon access may refine the mechanism.
+7. **Cosmetics:** `scripts/checkpatch.pl` on the final patch; conventional
+   subject (`usb: musb: gadget: don't flush RX FIFO on OUT requeue`); the
+   temporary diagnostics patch (`0004`, in git history at
+   `ab34094`..`91ae15a`) can be offered in the cover letter as the
+   instrumentation used to catch it.
