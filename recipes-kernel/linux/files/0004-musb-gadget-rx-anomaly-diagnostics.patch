@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: usb-proxy appliance <usb-proxy@local>
+Date: Thu, 2 Jul 2026 00:00:00 +0000
+Subject: [PATCH] musb: gadget: rate-limited RX anomaly diagnostics (bulk-OUT
+ stall investigation)
+
+Temporary instrumentation for the sustained bulk-OUT stall (large adb
+push / fastboot boot through usb-proxy). Two traces, both silent unless
+the anomaly actually occurs:
+
+ * musb_g_rx(): log OVERRUN/INCOMPRX with RXCOUNT and the full RXCSR.
+   Either flag on an OUT endpoint means the controller dropped or
+   mangled a packet the host believes was ACKed -- the suspected
+   failure mode. The stock code clears these flags silently.
+
+ * musb_ep_restart() RX requeue path (added by patch 0001): log if the
+   FLUSHFIFO fallback ever runs with FIFOFULL set while RXPKTRDY is
+   clear, a state where flushing would destroy received data.
+
+Applies on top of 0001-musb-gadget-service-pending-RX-packet-on-requeue.
+Remove once the stall investigation concludes.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+ drivers/usb/musb/musb_gadget.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+--- a/drivers/usb/musb/musb_gadget.c
++++ b/drivers/usb/musb/musb_gadget.c
+@@ -818,6 +818,19 @@
+ 	musb_dbg(musb, "<== %s, rxcsr %04x%s %p", musb_ep->end_point.name,
+ 			csr, dma ? " (dma)" : "", request);
+ 
++	/*
++	 * Diagnostic (usb-proxy appliance): OVERRUN or INCOMPRX on an OUT
++	 * endpoint means the controller dropped or mangled a packet the host
++	 * believes was ACKed -- the failure mode suspected in the sustained
++	 * bulk-OUT stall. The stock code clears these flags silently.
++	 */
++	if (csr & (MUSB_RXCSR_P_OVERRUN | MUSB_RXCSR_INCOMPRX))
++		pr_info_ratelimited("musb rx-diag: %s csr %04x count %d%s%s\n",
++				musb_ep->end_point.name, csr,
++				musb_readw(epio, MUSB_RXCOUNT),
++				(csr & MUSB_RXCSR_P_OVERRUN) ? " OVERRUN" : "",
++				(csr & MUSB_RXCSR_INCOMPRX) ? " INCOMPRX" : "");
++
+ 	if (csr & MUSB_RXCSR_P_SENTSTALL) {
+ 		csr |= MUSB_RXCSR_P_WZC_BITS;
+ 		csr &= ~MUSB_RXCSR_P_SENTSTALL;
+@@ -1190,6 +1203,15 @@
+ 		if (csr & MUSB_RXCSR_RXPKTRDY) {
+ 			rxstate(musb, req);
+ 		} else {
++			/*
++			 * Diagnostic: flushing with FIFOFULL set but RXPKTRDY
++			 * clear would destroy received data in a state the
++			 * driver does not expect; scream if it ever happens.
++			 */
++			if (csr & MUSB_RXCSR_FIFOFULL)
++				pr_info_ratelimited("musb rx-diag: %s requeue flush with FIFOFULL, csr %04x count %d\n",
++						req->ep->end_point.name, csr,
++						musb_readw(epio, MUSB_RXCOUNT));
+ 			csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
+ 			musb_writew(epio, MUSB_RXCSR, csr);
+ 			musb_writew(epio, MUSB_RXCSR, csr);
