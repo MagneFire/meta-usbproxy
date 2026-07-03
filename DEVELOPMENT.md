@@ -419,8 +419,8 @@ Three layers now handle this:
 | Layer | What it covers | Where |
 |---|---|---|
 | CPU capped at 816 MHz (1008 OPP deleted) | Removes all rail switching — both remaining OPPs run at a constant 1.1 V. No perf cost: the proxy is USB-RTT-bound and idles at 648 MHz. | kernel patch `0004` |
-| `panic_on_oops` + `panic=5` | Any oops/panic prints in full, then reboots 5 s later instead of limping on with corrupt state (oops) or hanging forever (panic). | `usbproxy-resilience.cfg` |
-| Hardware watchdog, armed from U-Boot | Silent hard hangs anywhere from U-Boot through userspace → hardware reset in ≤8 s. U-Boot arms+feeds it (`CONFIG_WDT`), busybox `watchdog -T 8 -t 2` takes over from inittab. | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
+| `panic_on_oops` + panic timeout | Any oops/panic prints in full, then reboots ~10 s later instead of limping on with corrupt state (oops) or hanging forever (panic). (The Kconfig sets 5 s but meta-sunxi's `boot.scr` passes `panic=10` on the cmdline, which wins — fine.) | `usbproxy-resilience.cfg` |
+| Hardware watchdog, armed from U-Boot | Silent hard hangs anywhere from U-Boot through userspace → hardware reset in ≤8 s. U-Boot arms+feeds it (`CONFIG_WDT` + `CONFIG_WATCHDOG_AUTOSTART` — the latter is default-**off** on sunxi upstream and without it the boot window is unarmed), busybox `watchdog -T 8 -t 2` takes over from inittab. Boot banner must say `WDT: Started watchdog@1c20ca0 ... (8s timeout)`, not `WDT: Not starting`. | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
 
 **Post-mortem: ramoops/pstore.** The rootfs is RAM, so without persistence a
 self-reboot would erase all evidence. Patch `0004` reserves 128 KiB at
@@ -435,9 +435,19 @@ cat /sys/fs/pstore/console-ramoops-0  # trailing console log
 rm /sys/fs/pstore/*                   # ack/clear after reading
 ```
 
+A `console-ramoops-0` from the previous boot is normal (`PSTORE_CONSOLE` writes
+it every boot); a crash leaves a `dmesg-ramoops-*` record.
+
 Drills: `echo c > /proc/sysrq-trigger` forces a panic (tests the reboot + the
 pstore record); `kill -STOP $(pidof watchdog)` starves the watchdog (tests the
 ≤8 s hardware reset).
+
+**Verified on hardware 2026-07-03**: settings all active (816 cap, rail pinned
+at 1.1 V); panic drill → full print → auto-reboot → `Panic#1` readable in
+pstore; watchdog starvation → reset within the 8 s budget; U-Boot banner shows
+the WDT armed at power-on; 10/10 warm-reboot soak with zero oopses (boot was
+the historical crash window); 10 MB `adb push` 2.6–2.7 MB/s md5-exact (no
+regression from the CPU cap).
 
 **If corruption recurs at 816 MHz** (check pstore for the signature): the next
 knob is DRAM 480→408 in `usbproxy-uboot.cfg` (`CONFIG_DRAM_CLK`); after that,
