@@ -20,12 +20,21 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    Disabling them releases PHY0 to musb so the micro-USB enumerates as a
 #    gadget (dr_mode stays "peripheral") AND skips their probe/USB enumeration,
 #    trimming kernel boot. Also disables mmc1 (XR819 wifi) and emac (ethernet).
+#  * 0004-dts-...cap-cpu-816-add-ramoops: crash-resilience DTS bits. Deletes
+#    the 1008MHz OPP so the two-state vdd-cpux GPIO regulator (1.1/1.3V) never
+#    switches again (the DVFS rail transient is the prime suspect for the
+#    intermittent boot-time oopses with corrupt pointers), and reserves 128KiB
+#    for ramoops so crash logs survive the panic auto-reboot.
 #  * usbproxy.cfg: build raw_gadget and the musb gadget stack into the kernel
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
+#  * usbproxy-resilience.cfg: panic_on_oops + 5s panic reboot + pstore/ramoops
+#    (pairs with the 0004 reserved-memory node).
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
     file://0003-dts-orangepi-zero-appliance-trim.patch \
+    file://0004-dts-orangepi-zero-cap-cpu-816-add-ramoops.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
+    file://usbproxy-resilience.cfg \
 "

@@ -1,0 +1,73 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: cap CPU at 816 MHz, add ramoops crash log
+
+Two appliance-resilience changes against intermittent oopses with corrupt
+pointers (random register/stack corruption, worst at boot):
+
+ - Delete the 1008 MHz OPP. vdd-cpux is a two-state GPIO regulator
+   (1.1 V / 1.3 V on PL6) and only the 1008 MHz OPP needs the 1.3 V state.
+   Measured on the appliance: schedutil flaps 648<->1008 many times per
+   second under mere shell activity, toggling the rail with it (4 ms
+   RC-network ramp) - that switching transient is the prime suspect for
+   the corruption (the DRAM 624->480 downclock in U-Boot reduced but did
+   not eliminate it). With 1008 gone both remaining OPPs run at 1.1 V and
+   the rail never switches. The proxy is USB-latency-bound and idles at
+   648 MHz, so this costs nothing.
+
+ - Reserve 128 KiB at 252 MiB for ramoops/pstore (CONFIG_PSTORE_RAM in
+   usbproxy-resilience.cfg). The rootfs is a RAM initramfs and the kernel
+   now reboots itself on any oops/panic, so this is the only place the
+   crash text survives for post-mortem reading (/sys/fs/pstore).
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -68,6 +68,26 @@
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
++	/* usb-proxy appliance: persistent crash log (ramoops/pstore). The
++	 * rootfs is a RAM initramfs and the kernel reboots itself on any
++	 * oops/panic (panic_on_oops + panic timeout), so without this the
++	 * crash text would be gone before anyone could read it. 128 KiB at
++	 * 252 MiB: inside RAM on the 256 MiB Zero, ~4 MiB below top-of-RAM
++	 * so U-Boot's relocation/stack never scribbles it, far above the
++	 * kernel+initramfs load area. Pair with CONFIG_PSTORE_RAM. */
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		ramoops@4fc00000 {
++			compatible = "ramoops";
++			reg = <0x4fc00000 0x20000>;
++			record-size = <0x8000>;
++			console-size = <0x10000>;
++		};
++	};
++
+ 	leds {
+ 		compatible = "gpio-leds";
+ 
+@@ -123,6 +143,20 @@
+ 	cpu-supply = <&reg_vdd_cpux>;
+ };
+ 
++/* usb-proxy appliance: cap the CPU at 816 MHz. vdd-cpux is a two-state
++ * GPIO regulator (1.1 V / 1.3 V on PL6); only the 1008 MHz OPP needs the
++ * 1.3 V state, so with it gone the rail sits at a constant 1.1 V and
++ * cpufreq never toggles PL6 again. Measured on the appliance: schedutil
++ * flaps 648<->1008 many times per second under mere shell activity,
++ * switching the rail with it (4 ms RC-network ramp) - that transient is
++ * the prime suspect for the intermittent oopses with corrupt pointers
++ * (random register/stack corruption, worst at boot = peak flapping; the
++ * DRAM 624->480 downclock reduced but did not eliminate them). The proxy
++ * is USB-latency-bound and idles at 648 MHz, so 816 costs nothing. */
++&cpu0_opp_table {
++	/delete-node/ opp-1008000000;
++};
++
+ &ehci0 {
+ 	/* OTG host companion (PHY0): unused - the OTG port is the musb
+ 	 * gadget. Disabling releases PHY0 to musb and trims USB boot time. */

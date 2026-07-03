@@ -395,3 +395,51 @@ patch `0001` (v2) removes the flush entirely. Verified: repeated 10–50 MB
 pushes complete md5-exact at ~1.2 MB/s. **See
 [`MUSB-BULK-OUT.md`](MUSB-BULK-OUT.md)** for the investigation record, the
 evidence, and the diagnostic tooling (`adb_bulk_diag`) that found it.
+
+---
+
+## 9. Crash resilience (reboot-on-panic, watchdog, ramoops)
+
+**Background (2026-07-03).** The appliance intermittently oopsed, mostly during
+boot, with random pointer corruption — e.g. an oops in plain `memset` where the
+destination register held odd-aligned garbage while every other register was
+correct. That signature (register/stack corruption in trivial code paths,
+random victim process) is hardware-level marginality, not a kernel code bug.
+It's the same symptom that prompted the DRAM 624→480 MHz downclock in
+`recipes-bsp/u-boot/files/usbproxy-uboot.cfg`, which reduced but didn't
+eliminate it. Live measurement then showed the prime remaining suspect:
+`vdd-cpux` is a two-state GPIO regulator (1.1 V/1.3 V on PL6), only the
+1008 MHz OPP needs 1.3 V, and schedutil flapped 648↔1008 many times per second
+under mere shell activity — toggling the rail (4 ms RC ramp) with samples
+catching `1008 MHz @ 1.1 V` interleavings. Boot = peak flapping = the crash
+window.
+
+Three layers now handle this:
+
+| Layer | What it covers | Where |
+|---|---|---|
+| CPU capped at 816 MHz (1008 OPP deleted) | Removes all rail switching — both remaining OPPs run at a constant 1.1 V. No perf cost: the proxy is USB-RTT-bound and idles at 648 MHz. | kernel patch `0004` |
+| `panic_on_oops` + `panic=5` | Any oops/panic prints in full, then reboots 5 s later instead of limping on with corrupt state (oops) or hanging forever (panic). | `usbproxy-resilience.cfg` |
+| Hardware watchdog, armed from U-Boot | Silent hard hangs anywhere from U-Boot through userspace → hardware reset in ≤8 s. U-Boot arms+feeds it (`CONFIG_WDT`), busybox `watchdog -T 8 -t 2` takes over from inittab. | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
+
+**Post-mortem: ramoops/pstore.** The rootfs is RAM, so without persistence a
+self-reboot would erase all evidence. Patch `0004` reserves 128 KiB at
+`0x4fc00000` (~4 MB below the 256 MB top-of-RAM, clear of U-Boot's relocation)
+and `usbproxy-resilience.cfg` enables `PSTORE_RAM` + `PSTORE_CONSOLE`. After
+any crash-reboot, read the previous kernel's oops and console log:
+
+```sh
+ls -la /sys/fs/pstore/            # mounted from inittab at boot
+cat /sys/fs/pstore/dmesg-ramoops-0    # the oops/panic dump
+cat /sys/fs/pstore/console-ramoops-0  # trailing console log
+rm /sys/fs/pstore/*                   # ack/clear after reading
+```
+
+Drills: `echo c > /proc/sysrq-trigger` forces a panic (tests the reboot + the
+pstore record); `kill -STOP $(pidof watchdog)` starves the watchdog (tests the
+≤8 s hardware reset).
+
+**If corruption recurs at 816 MHz** (check pstore for the signature): the next
+knob is DRAM 480→408 in `usbproxy-uboot.cfg` (`CONFIG_DRAM_CLK`); after that,
+suspect the 5 V supply path (powered from a host USB port = voltage droop —
+use a solid supply).

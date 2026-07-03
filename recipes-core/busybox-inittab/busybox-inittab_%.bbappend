@@ -11,6 +11,12 @@ USE_VT = "0"
 do_install:append() {
     printf '\n# Appliance power tuning (offline spare CPU cores), run once at boot.\n' >> ${D}${sysconfdir}/inittab
     printf '::sysinit:/usr/bin/power-tune\n' >> ${D}${sysconfdir}/inittab
+    printf '\n# Crash post-mortem: expose ramoops records (the kernel auto-reboots on\n' >> ${D}${sysconfdir}/inittab
+    printf '# any oops/panic; the crash text lands here, surviving the reboot).\n' >> ${D}${sysconfdir}/inittab
+    printf '::sysinit:/bin/mount -t pstore pstore /sys/fs/pstore\n' >> ${D}${sysconfdir}/inittab
+    printf '\n# Feed the hardware watchdog (armed by U-Boot at power-on; a silent hang\n' >> ${D}${sysconfdir}/inittab
+    printf '# anywhere resets the board in <=8s). -F: foreground so init tracks it.\n' >> ${D}${sysconfdir}/inittab
+    printf '::respawn:/sbin/watchdog -F -T 8 -t 2 /dev/watchdog\n' >> ${D}${sysconfdir}/inittab
     printf '\n# usb-proxy appliance: the single purpose of this device.\n' >> ${D}${sysconfdir}/inittab
     printf '# Respawn on exit covers device unplug/replug and crashes.\n' >> ${D}${sysconfdir}/inittab
     printf '::respawn:/usr/bin/usb-proxy-run\n' >> ${D}${sysconfdir}/inittab
