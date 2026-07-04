@@ -103,7 +103,7 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
   `0004` diagnostics patch (OVERRUN/INCOMPRX + phantom-ZLP traces) was removed
   after verification; it lives in git history (`ab34094`..`91ae15a`) if ever
   needed again.
-- **usb-proxy `opi` branch (`70c9f62`, SRCREV-pinned):**
+- **usb-proxy `opi` branch (`9518d60`, SRCREV-pinned):**
   - `send_data()` bulk-OUT never drops: resends only the unsent tail,
     indefinitely, while the device NAKs (`[outdev]` rate-limited logs);
     `ep_loop_write` logs any fatal send failure instead of swallowing it.
@@ -117,6 +117,8 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
   - `70c9f62`: `adb_ack_accel` — opt-in local WRTE acks for legacy ADB
     (throughput; see round 2 below). The appliance config enables it, plus
     `async_bulk_out_in_flight: 16` and `musb_out_read_packets: 16`.
+  - `9518d60`: `adb_ack_accel` pull direction + sized bulk-IN reads
+    (see round 3 below).
 
 ## 6. Diagnostic tooling built during the investigation
 
@@ -220,6 +222,53 @@ attacks, both in usb-proxy `opi` (`9250e40`, `70c9f62`):
 - Remaining gap to the 9.1 MB/s direct rate is the proxy datapath itself
   (musb PIO per-packet interrupts); 4-core test showed no gain, 16-packet
   gadget reads ≈ 8-packet. Not worth chasing further.
+
+### Throughput tuning, round 3 (2026-07-04): pull 1.3 → ~4.5 MB/s; fastboot assessed
+
+`adb pull` was still at the unaccelerated rate; the same two costs applied in
+mirror (usb-proxy `9518d60`, measured on the Moto 360 "minnow" dev system,
+flag-off/on A/B in the same session):
+
+| Config (10 MB pulls, md5-verified) | Throughput |
+|---|---|
+| `adb_ack_accel: false` (either watch system) | 1.3 MB/s |
+| pull-direction accel + sized bulk-IN reads | **4.4–4.7 MB/s** (50 MB: 4.4) |
+
+- **Pull-direction ACK accelerator**: on a device→host WRTE header the proxy
+  submits a fabricated OKAY *toward the device* (via the async bulk-OUT path,
+  which it therefore requires) and swallows the host's real OKAYs on the OUT
+  stream. Same credit model as push (8 credits, hold at zero, any real OKAY
+  refills + releases), separate per-direction bookkeeping. Device-bound
+  spoofs are only submitted while the host→device parser is at a message
+  boundary; `out_feed()` runs before the OUT thread's submit, so the worst
+  interleaving is two *complete* messages swapping order (harmless in ADB).
+- **Sized bulk-IN reads**: the old IN datapath was one blocking libusb call
+  (plus one gadget write) per 512-byte packet — ~9 calls per 4 KB WRTE.
+  Mid-payload the accelerator's parser knows the exact remaining byte count,
+  so `receive_data()` takes the whole payload in one call. Sized reads can
+  time out with partial data (now forwarded, not dropped) and fail open on
+  overflow (framing view wrong → back to one-packet reads).
+- Verification: 8/8 × 50 MB pulls md5-exact with a concurrent `adb shell`
+  loop (140 commands, 0 failures); push regression md5-exact; interleaved
+  push/pull fine; interrupted pull recovers; nonexistent-path pull errors
+  cleanly; full-tmpfs push still reports the remote ENOSPC end-to-end;
+  flag-off run back at 1.3 MB/s baseline; pstore empty throughout.
+- **Fastboot: nothing to accelerate.** Its download phase is one command →
+  `DATA` response → a continuous raw bulk-OUT stream → one OKAY; there is no
+  per-chunk ack ping-pong for an accelerator to hide. Measured through the
+  proxy: 8.7 MB in 3.15 s = **2.8 MB/s**, byte-identical at async depth 16
+  vs 32, and *slower* than ack-windowed adb push (5.5–7.5 MB/s) through the
+  very same bulk-OUT datapath — so the wall is the watch bootloader's own
+  USB sink, not the proxy. (A direct-to-Mac `fastboot boot` timing would
+  confirm; expected ≈ the same 2.8.) The accelerator correctly fails open on
+  fastboot's non-ADB framing (`DISABLED ... spoofed=0` per session) and
+  `fastboot getvar`/`boot` work unchanged. Old bootloader quirk: `fastboot
+  stage` hangs (unsupported command, absorbed download) — unrelated to the
+  proxy.
+- Rough remaining pull budget: ~0.85 ms per 4 KB message ≈ device-side
+  turnaround + 2 sync libusb calls + gadget writes; a further win would need
+  an async bulk-IN pipeline (mirror of `send_data_async`) — diminishing
+  returns, not pursued.
 
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 
