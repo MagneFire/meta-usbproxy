@@ -221,10 +221,30 @@ Then **commit** your edit (AUTOREV builds the branch HEAD, so uncommitted change
 are invisible) and `bitbake usbproxy-image`. **Remove the bbappend when done** to
 restore the pinned, reproducible build.
 
+**Binary swap over serial (no reflash at all).** The rootfs is RAM-backed, so a
+freshly built `usb-proxy` binary can be dropped onto the *running* appliance and
+respawned — the whole loop (build → upload → restart → measure) is ~3 minutes
+and needs no SD-card handling. Used heavily for the 2026-07-04 throughput work:
+
+```sh
+# In the build env: build, strip, gzip (the gz is ~40 KB)
+devtool build usb-proxy
+tmp/work/*/usb-proxy/*/recipe-sysroot-native/usr/bin/arm-poky-linux-gnueabi/arm-poky-linux-gnueabi-strip \
+    /Users/darrel/Downloads/usb-proxy/usb-proxy -o /tmp/up && gzip -9f /tmp/up
+# From the Mac: upload (~80 s), install, respawn
+uv run scripts/serial-upload.py /tmp/up.gz /tmp/up.gz
+uv run scripts/pi-serial.py "gunzip -f /tmp/up.gz && chmod +x /tmp/up \
+    && mv /tmp/up /usr/bin/usb-proxy && kill -9 \$(pidof usb-proxy)" 8
+```
+
+Does not survive a reboot (RAM rootfs) — bake the change into the image when
+done. See the `scripts/serial-upload.py` docstring for details/gotchas.
+
 ### Branches are controller-specific — do not cross them
 
 - `opi` → sunxi **musb** (the Orange Pi appliance). Carries: clamp bulk/interrupt
-  OUT reads to one packet on musb, the bulk-IN timeout fix, `_exit` on NO_DEVICE.
+  OUT reads to one packet on musb, the bulk-IN timeout fix, `_exit` on NO_DEVICE,
+  the condvar/fast-path latency work and `adb_ack_accel` (MUSB-BULK-OUT.md §7).
 - `rpi` → **dwc2** (Raspberry Pi 4), tuned differently.
 
 `opi` will **not** enumerate on dwc2 and vice-versa, so the RPi4 can't mirror the

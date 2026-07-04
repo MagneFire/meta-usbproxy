@@ -3,5 +3,6 @@
     "bmaxpacketsize0_must_greater_than_64": true,
     "adb_bulk_diag": false,
     "async_bulk_out_in_flight": 16,
-    "musb_out_read_packets": 8
+    "musb_out_read_packets": 16,
+    "adb_ack_accel": true
 }

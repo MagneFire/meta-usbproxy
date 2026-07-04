@@ -103,7 +103,7 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
   `0004` diagnostics patch (OVERRUN/INCOMPRX + phantom-ZLP traces) was removed
   after verification; it lives in git history (`ab34094`..`91ae15a`) if ever
   needed again.
-- **usb-proxy `opi` branch (`ce92f49`, SRCREV-pinned):**
+- **usb-proxy `opi` branch (`70c9f62`, SRCREV-pinned):**
   - `send_data()` bulk-OUT never drops: resends only the unsent tail,
     indefinitely, while the device NAKs (`[outdev]` rate-limited logs);
     `ep_loop_write` logs any fatal send failure instead of swallowing it.
@@ -111,8 +111,12 @@ stalled early; `fastboot` verifies only at end-of-download so it reached ~94%.
   - `adb_bulk_diag` (opt-in, default off): ADB/file-sync stream parser on both
     bulk directions; logs DATA chunk completion/shortfall and ZLP placement.
     This is the tool that found the root cause — keep it.
-  - `drop_zero_len_out` and the async bulk-OUT path remain opt-in, off by
-    default, unneeded for this bug.
+  - `drop_zero_len_out` remains opt-in, off by default, unneeded for this bug.
+  - `9250e40`: condvar queue wakeups, direct async bulk-OUT submit from the
+    read thread, 1 µs timer slack (latency; see throughput round 2 below).
+  - `70c9f62`: `adb_ack_accel` — opt-in local WRTE acks for legacy ADB
+    (throughput; see round 2 below). The appliance config enables it, plus
+    `async_bulk_out_in_flight: 16` and `musb_out_read_packets: 16`.
 
 ## 6. Diagnostic tooling built during the investigation
 
@@ -166,10 +170,56 @@ Findings:
   Kept for the CPU/syscall reduction on the 648 MHz appliance.
 - Pushing past ~3 MB/s would need RTT reduction (e.g. the 100 µs sleep-poll
   handoffs between the read/write threads) or ADB burst/delayed-ack mode —
-  diminishing returns, not pursued.
+  diminishing returns, not pursued. *(Pursued after all on 2026-07-04 — see
+  below.)*
 - Multi-packet reads also passed the historical regression: ADB CNXN
   handshake + enumeration fine (the original failure mode that motivated the
   one-packet clamp).
+
+### Throughput tuning, round 2 (2026-07-04): 3 → ~7 MB/s
+
+The device ("Hoki" watch, Android 9 Wear OS) negotiates a **legacy ADB
+transport** — empty feature list, 4 KB max payload, one WRTE outstanding per
+stream — so throughput is strictly `4096 / RTT`. Delayed-ack is impossible
+(adbd far too old; verified `adb features` empty with host adb 37). Two
+attacks, both in usb-proxy `opi` (`9250e40`, `70c9f62`):
+
+| Config (10 MB pushes, md5-verified) | Throughput |
+|---|---|
+| baseline (schedutil) | 2.2–2.9 MB/s |
+| performance governor (now in `power-tune`) | 3.2–3.3 MB/s |
+| + condvars/fast-path/timerslack (`9250e40`) | 3.7–4.0 MB/s |
+| + `adb_ack_accel` (`70c9f62`, ack on payload completion) | 6.6–6.8 MB/s |
+| + ack on WRTE *header* (final) | **7.1–7.9 MB/s** (50 MB: 6.9) |
+
+- **RTT trimming (`9250e40`)**: per-endpoint condition variables replace the
+  `usleep(100)` queue polls (two of them sat on every WRTE→OKAY cycle); bulk
+  OUT submits async directly from the gadget-read thread (one handoff gone);
+  `PR_SET_TIMERSLACK` 1 µs. Protocol-agnostic, always on.
+- **ADB ACK accelerator (`70c9f62`, opt-in `adb_ack_accel`, baked into the
+  appliance config)**: acks host WRTEs locally as soon as the WRTE *header*
+  arrives and swallows the device's real OKAYs — the host streams WRTEs
+  gaplessly and the remaining ceiling is the datapath itself. Bounded
+  spoof-ahead (8), boundary-safe injection, fails open on any framing
+  surprise. The file-sync `DONE→OKAY/FAIL` handshake rides in device→host
+  WRTEs untouched, so push success/failure is still end-to-end (verified:
+  push to a full tmpfs still errors).
+- **Hard-won lesson**: old adbd's OKAYs are *not* one-per-WRTE. While its
+  transport thread pauses (e.g. forking a shell service), WRTEs pile into the
+  stream buffer and are acked with a **single coalesced READY** on drain. A
+  FIFO ack-matching first cut deadlocked ~50% of the time under concurrent
+  `adb shell` traffic (push stalls, needs kill). Final design is credit-based:
+  spoof while per-pair credit (8) lasts, hold the ack at zero (host waits on
+  real flow control), and treat any real OKAY as "buffer drained" — swallow,
+  refill, release held acks.
+- Verification: 8/8 × 50 MB pushes md5-exact **with concurrent shell
+  traffic** (6 credit exhaustions, 6 clean recoveries in the log), pull
+  md5-exact (device→host direction unaccelerated, ~1.4 MB/s), flag-off run
+  behaves like `9250e40` alone (3.9 MB/s), fastboot getvar/reboot through the
+  proxy fine, full-tmpfs push still reports the remote error.
+- Remaining gap to the 9.1 MB/s direct rate is the proxy datapath itself
+  (musb PIO per-packet interrupts); 4-core test showed no gain, 16-packet
+  gadget reads ≈ 8-packet. Not worth chasing further.
 
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 

@@ -13,9 +13,10 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
            file://usb-proxy-run \
            file://power-tune \
 "
-# opi branch HEAD (carries the sunxi musb fixes + the NO_DEVICE _exit-on-
-# disconnect fix). Bump to advance.
-SRCREV = "7963818c7c075c63b170082343271e90cc6d3b44"
+# opi branch HEAD (carries the sunxi musb fixes, the NO_DEVICE _exit-on-
+# disconnect fix, the condvar/fast-path latency work and the adb_ack_accel
+# throughput feature). Bump to advance.
+SRCREV = "70c9f62df75d3aa3dc81c8d9bd9b9eeb421afc3a"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"

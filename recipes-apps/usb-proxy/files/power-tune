@@ -7,13 +7,21 @@
 # spend their time blocked on USB transfers, not computing), so two cores at the
 # lowest OPP comfortably saturate USB 2.0. Offlining the other two removes their
 # static/leakage draw on this always-on device. CPU hotplug is supported on
-# mainline sunxi H3, and schedutil idles the rest at the lowest frequency.
+# mainline sunxi H3. (The governor for the remaining cores is set below.)
 # To keep all four cores, empty OFFLINE_CPUS.
 OFFLINE_CPUS="2 3"
 for c in $OFFLINE_CPUS; do
 	node="/sys/devices/system/cpu/cpu$c/online"
 	[ -w "$node" ] && echo 0 > "$node"
 done
+
+# --- CPU: performance governor ------------------------------------------------
+# Pin the remaining cores at the top OPP (816MHz after kernel patch 0004 — the
+# 1.1V-rail OPP, so no voltage cost). schedutil's per-packet ramping adds real
+# latency to the ADB round trip: measured 2.2-2.9MB/s push with schedutil vs a
+# steady 3.2-3.3MB/s with performance (pre-accelerator numbers). The two online
+# A7 cores at 816MHz draw little; steady latency wins on this always-on proxy.
+echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 
 # --- Ethernet: turn off the unused PHY's RJ45 LEDs ----------------------------
 # The H3 internal Ethernet PHY is already at its lowest-power state at boot: its
