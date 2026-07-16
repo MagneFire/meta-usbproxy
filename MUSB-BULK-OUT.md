@@ -270,6 +270,46 @@ flag-off/on A/B in the same session):
   an async bulk-IN pipeline (mirror of `send_data_async`) — diminishing
   returns, not pursued.
 
+## 7b. Fastboot download tail hang (2026-07-16) — RESOLVED
+
+`fastboot boot` of some images hung forever at `downloading '...'` through the
+appliance while others worked — image-dependent, 100% reproducible. Root cause
+(usb-proxy, not kernel): fastboot's download payload is a raw bulk-OUT stream
+with **no terminating ZLP**, so when the image size is a multiple of
+wMaxPacketSize the final packets can't complete a multi-packet gadget read via
+a short packet. With `musb_out_read_packets: 16` (reads capped at 4096 by
+`MAX_TRANSFER_SIZE`), a sub-4096 tail of full 512 B packets left
+`usb_raw_ep_read()` blocked forever:
+
+- `twrp-3.1.1-0-minnow.img` (8,026,112 B, mod 4096 = 2048): 1× 17 B
+  `download:` cmd + 1959× 4096 B reads, **last 2048 B stuck** → watch never
+  OKAYs → host pinned at 'downloading'.
+- `zImage-dtb-minnow.fastboot` (8,990,720 B, mod 4096 = **0**): divides evenly
+  into 4096 B reads — worked by pure luck, masking the bug for months.
+
+Fix (usb-proxy `opi` `471860a`): the bulk-OUT read loop parses the host's
+`download:%08x` command and shrinks subsequent reads to the remaining payload
+(rounded up to a whole packet), so the last buffer completes on fill. Logs
+`fastboot download of N bytes, sizing tail reads` / `payload complete`.
+Verified on hardware: the always-hanging TWRP image now downloads in 2.8 s and
+boots to the TWRP UI.
+
+Operational lessons from the debug session:
+
+- **Do not USB-reset a bootloader mid-download.** After an aborted download
+  (bootloader still expecting N bytes), every subsequent fastboot command is
+  eaten as payload. A `reset_device_before_proxy: true` respawn to un-wedge it
+  instead knocked the minnow bootloader off the bus entirely (recovered only
+  by replugging the watch cradle).
+- **`kill -9` + inittab respawn is invisible to the Mac**: the UDC re-attaches
+  within milliseconds, macOS keeps its stale configured device object (same
+  ioreg id), never re-enumerates, and the new proxy session waits forever at
+  `event: connect` with no bulk threads — looks exactly like "adb broken".
+  Neither `soft_connect` toggling nor a 6 s UDC unbind woke the Mac up once
+  its port state had wedged (`system_profiler SPUSBDataType` returning empty
+  output is the tell); only a physical replug of the Mac↔OPi cable clears it
+  (which also power-cycles the OPi — RAM rootfs, swapped binaries are lost).
+
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 
 The fix would benefit any gadget driver that requeues OUT requests outside

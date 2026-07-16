@@ -17,7 +17,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # disconnect fix, drain-before-exit so a `fastboot boot` OKAY still reaches
 # the host as the device drops off the bus, the condvar/fast-path latency
 # work and the adb_ack_accel throughput feature). Bump to advance.
-SRCREV = "43efe6eabfb1ee7ab7048add093188a02d044f59"
+SRCREV = "471860a65d6503fafbf11a530d2705808a2ba6a1"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
