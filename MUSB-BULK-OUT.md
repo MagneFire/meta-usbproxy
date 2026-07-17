@@ -355,6 +355,19 @@ TWRP's CNXN banner is `device::ro.product...`, not `recovery::` (never gate
 on banner), and fastboot traffic hitting the accel's ADB parser trips the
 intended fail-open (`[ackaccel] DISABLED: unparseable header`) — harmless.
 
+**`adb sideload` in this TWRP is broken device-side (not the proxy).**
+Byte-level capture (verbose 2 payload dump, accelerator disabled): the host
+opens `sideload-host:<size>:65536`, minadbd OKAYs, and the watch's first and
+only sideload message is `WRTE("DONEDONE")` — it never requests block 0
+(`"00000000"` appears nowhere). The host adb client correctly interprets
+that as "transfer complete" (instant `Total xfer: 0.00x`, exit 0) and TWRP
+shows "ADB Sideload Complete failed" on its own screen — its sideload
+service gives up internally before requesting any data. Workaround that
+works through the proxy: `adb push` the zip (7.1 MB/s) and install it from
+the TWRP UI. The wedged-Mac recovery trick is now a script:
+`scripts/mac-usb-unwedge.py` (probe mode resets only devices whose
+GET_STATUS fails).
+
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 
 The fix would benefit any gadget driver that requeues OUT requests outside
