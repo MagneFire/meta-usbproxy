@@ -309,6 +309,51 @@ Operational lessons from the debug session:
   its port state had wedged (`system_profiler SPUSBDataType` returning empty
   output is the tell); only a physical replug of the Mac↔OPi cable clears it
   (which also power-cycles the OPi — RAM rootfs, swapped binaries are lost).
+  **Superseded 2026-07-17:** a wedged port can be cleared *without* replug or
+  reboot — `libusb_reset_device` on the stale device (3-line pyusb
+  `dev.reset()`) forces macOS to drop the fossil object and re-enumerate.
+  Diagnosis of the wedge from userspace: descriptor reads "succeed" (served
+  from the macOS cache) while GET_STATUS — never cached — fails with
+  `LIBUSB_ERROR_IO` and nothing reaches the proxy log.
+
+## 7c. TWRP adb churn (2026-07-17) — RESOLVED (not the accelerator)
+
+Through the appliance, adb in TWRP 3.1.1 never came up: the watch
+connect/disconnected every ~1.3 s on the OPi host port (dmesg device numbers
+wrapping past 127) while direct watch↔Mac TWRP adb worked. `adb_ack_accel`
+was the initial suspect from an A/B, but a full verbose capture showed **zero
+ackaccel activity and zero CNXN in every churn cycle — no ADB traffic ever
+flowed**. The A/B had been confounded: the "stable with accel off" soaks ran
+against a wedged Mac that never enumerated.
+
+Root cause (usb-proxy, not kernel, not the accel): the proxy forwarded the
+host's `SET_CONFIGURATION` to the watch verbatim — but the OPi kernel had
+*already* configured the watch at enumeration, and TWRP-era legacy Android
+gadgets react to a **duplicate SET_CONFIGURATION** by tearing down and
+re-initialising every function. adbd's endpoints die, the gadget
+pulse-disconnects (~0.4 s off bus), the proxy exits NO_DEVICE and respawns,
+the Mac re-enumerates, sends SET_CONFIGURATION again → loop forever. The
+Mac-side `adb devices` stays empty throughout because adb 37.x (libusb
+backend) gives up on a device whose serial string read fails mid-churn.
+Fastboot and Wear OS adb tolerated the duplicate, which is why only TWRP
+broke. Under sustained churn the watch eventually left the bus entirely and
+needed a manual reboot.
+
+Fix (usb-proxy `opi` `56aa36a`, pinned by meta-usbproxy `0c8e883`):
+`set_configuration()` in device-libusb.cpp queries
+`libusb_get_configuration` (answered from sysfs on Linux — no bus traffic)
+and skips the request when the device is already in that configuration. This
+also leaves both sides' data-toggle state consistent, where forwarding reset
+only the device's half. Logs `Device already in configuration N, not
+re-sending SET_CONFIGURATION`.
+
+Verified on hardware: TWRP boots via `fastboot boot` through the proxy, the
+adb handshake completes, 20 MB `adb push` at 7.1 MB/s and pull at 4.6 MB/s
+both md5-exact **with the accelerator active against TWRP's adbd** — the
+accel works fine in TWRP and is fully exonerated. Two notes for posterity:
+TWRP's CNXN banner is `device::ro.product...`, not `recovery::` (never gate
+on banner), and fastboot traffic hitting the accel's ADB parser trips the
+intended fail-open (`[ackaccel] DISABLED: unparseable header`) — harmless.
 
 ## 8. Upstreaming checklist (if submitting patch 0001 to linux-usb)
 
