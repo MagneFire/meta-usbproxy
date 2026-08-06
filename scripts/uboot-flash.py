@@ -170,5 +170,18 @@ out = send_cmd(f"mmc write {LOAD_ADDR} {SPL_SECTOR:x} {blocks:x}", 3.0)
 print(out)
 if "OK" not in out and "written" not in out.lower():
     sys.exit("mmc write did not report success — do NOT power cycle; check the console")
+
+# --- read it back off the card and check it -----------------------------------
+# The RAM check above only proves the transfer was good; this proves the card
+# actually holds what we think it does. Worth the extra two seconds: if a board
+# then fails to boot, this is what tells you the setting is at fault rather than
+# the flashing, and that distinction is otherwise very hard to make.
+READBACK = "0x43000000"
+send_cmd(f"mmc read {READBACK} {SPL_SECTOR:x} {blocks:x}", 3.0)
+out = send_cmd(f"crc32 {READBACK} {len(data):x}", 3.0)
+if f"{want:08x}" not in out.lower():
+    sys.exit(f"READBACK MISMATCH — the card does not hold the file (wanted {want:08x}):\n"
+             f"{out}\nDo NOT power cycle; reflash before resetting.")
+print(f"readback from card verified ({want:08x})")
 print("Written. Reset the board to run the new U-Boot.")
 ser.close()
