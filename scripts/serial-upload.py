@@ -54,6 +54,16 @@ def rd(t):
             buf += d.decode(errors="replace")
 
 
+def rd_some():
+    """Read whatever has arrived, blocking at most one serial timeout.
+
+    ser.read(4096) does NOT return early on partial data — it waits for all
+    4096 bytes or the full timeout, which cost a flat 200ms on every chunk
+    round trip. Reading in_waiting returns as soon as the reply lands.
+    """
+    return ser.read(ser.in_waiting or 1)
+
+
 def send(s, paced=False):
     b = s.encode()
     if not paced:
@@ -74,7 +84,7 @@ def run(cmd, marker, timeout=8.0):
     send(cmd + "\n", paced=True)
     end = time.time() + timeout
     while time.time() < end:
-        d = ser.read(4096)
+        d = rd_some()
         if d:
             buf += d.decode(errors="replace")
             if marker in buf:
@@ -106,16 +116,28 @@ if not run("echo SANITY-$((20+3))", "SANITY-23"):
 if not run(f"rm -f {remote}; echo K$?", "K0"):
     sys.exit("failed to reset remote file")
 
+# Stop the console echoing every command back at us. Each chunk is a ~935 char
+# printf line, so the echo was doubling the bytes on the wire and adding a full
+# line time to every round trip. Nothing below parses the echo — run() waits on
+# the `echo K$?` reply, which is real output and still arrives.
+run("stty -echo; echo K$?", "K0")
+
 n = (len(data) + CHUNK - 1) // CHUNK
 t0 = time.time()
-for i in range(n):
-    piece = data[i * CHUNK:(i + 1) * CHUNK]
-    esc = "".join(f"\\{b:03o}" for b in piece)
-    ok = run(f"printf '{esc}' >> {remote} && echo K$?", "K0")
-    if not ok:
-        sys.exit(f"chunk {i}/{n} failed:\n{buf[-500:]}")
-    if (i + 1) % 10 == 0 or i + 1 == n:
-        print(f"chunk {i+1}/{n} ({time.time()-t0:.0f}s)")
+try:
+    for i in range(n):
+        piece = data[i * CHUNK:(i + 1) * CHUNK]
+        esc = "".join(f"\\{b:03o}" for b in piece)
+        ok = run(f"printf '{esc}' >> {remote} && echo K$?", "K0")
+        if not ok:
+            sys.exit(f"chunk {i}/{n} failed:\n{buf[-500:]}")
+        if (i + 1) % 10 == 0 or i + 1 == n:
+            rate = (i + 1) * CHUNK / (time.time() - t0)
+            print(f"chunk {i+1}/{n} ({time.time()-t0:.0f}s, {rate:.0f} B/s)")
+finally:
+    # Always hand the console back with echo on, including on a failed chunk —
+    # otherwise the next interactive session looks dead.
+    run("stty echo; echo K$?", "K0", timeout=4.0)
 
 buf = ""
 run(f"md5sum {remote}", remote, timeout=10)

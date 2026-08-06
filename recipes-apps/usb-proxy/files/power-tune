@@ -1,27 +1,33 @@
 #!/bin/sh
-# One-shot power tuning for the usb-proxy appliance, run once at boot (inittab
-# sysinit), before usb-proxy starts.
+# Power tuning for the usb-proxy appliance.
+#
+#   power-tune [boot]   one-shot setup, run from inittab sysinit before usb-proxy
+#   power-tune active   wind up:   both cores, top OPP  (usb-proxy's power_hook)
+#   power-tune idle     wind down: one core,  low OPP   (usb-proxy's power_hook)
+#
+# usb-proxy calls the active/idle forms itself (config.json "power_hook") on the
+# first traffic after a quiet period and after power_idle_ms of silence. It knows
+# when USB traffic is flowing; the board-specific knobs live here, on the RAM
+# rootfs, so they can be retuned over the serial console without rebuilding the
+# binary.
+#
+# Measured on hardware 2026-08-06, appliance idle with a watch attached: fixing
+# usb-proxy's 1ms polled condvar wait took the idle wakeup rate from 1962/s to
+# 28/s and CPU busy from 3.34% to 0.25%. This script's job is what remains: not
+# holding two cores at the top OPP while nothing is happening.
 
-# --- CPU: offline spare cores -------------------------------------------------
-# The Allwinner H2+ is a quad Cortex-A7. usb-proxy is USB-I/O-bound (its threads
-# spend their time blocked on USB transfers, not computing), so two cores at the
-# lowest OPP comfortably saturate USB 2.0. Offlining the other two removes their
-# static/leakage draw on this always-on device. CPU hotplug is supported on
-# mainline sunxi H3. (The governor for the remaining cores is set below.)
-# To keep all four cores, empty OFFLINE_CPUS.
-OFFLINE_CPUS="2 3"
-for c in $OFFLINE_CPUS; do
-	node="/sys/devices/system/cpu/cpu$c/online"
-	[ -w "$node" ] && echo 0 > "$node"
-done
+POLICY=/sys/devices/system/cpu/cpufreq/policy0
+SPARE_CPU=/sys/devices/system/cpu/cpu1/online
 
-# --- CPU: performance governor ------------------------------------------------
-# Pin the remaining cores at the top OPP (816MHz after kernel patch 0004 — the
-# 1.1V-rail OPP, so no voltage cost). schedutil's per-packet ramping adds real
-# latency to the ADB round trip: measured 2.2-2.9MB/s push with schedutil vs a
-# steady 3.2-3.3MB/s with performance (pre-accelerator numbers). The two online
-# A7 cores at 816MHz draw little; steady latency wins on this always-on proxy.
-echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+# The OPP table has exactly two entries after kernel patch 0004 deleted the
+# 1008MHz one. Both run at 1.1V (vdd-cpux is a two-state GPIO regulator and only
+# 1008 needed 1.3V), so moving between them never switches the rail — that rail
+# flapping was the crash suspect patch 0004 removed, and nothing here reinstates
+# it. Note there is no `powersave` governor compiled in (available: ondemand,
+# performance, schedutil), so the OPP is selected via scaling_max_freq while the
+# governor stays `performance` throughout.
+FREQ_HIGH=816000
+FREQ_LOW=648000
 
 # --- Ethernet: turn off the unused PHY's RJ45 LEDs ----------------------------
 # The H3 internal Ethernet PHY is already at its lowest-power state at boot: its
@@ -33,9 +39,88 @@ echo performance > /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 # and takes effect even with the PHY gated/in-reset, so setting it makes the idle
 # LED outputs go dark while the PHY stays fully powered down.
 #   0x01c00030  EMAC-EPHY syscon   H3_EPHY_LED_POL = BIT(17)
-if command -v devmem >/dev/null 2>&1; then
+ephy_leds_off() {
+	command -v devmem >/dev/null 2>&1 || return 0
 	v=$(devmem 0x01c00030)
 	devmem 0x01c00030 32 "$(printf '0x%x' $(( v | 0x20000 )))"
-fi
+}
+
+# --- Display Engine: gate the clock U-Boot left running -----------------------
+# Found 2026-08-06 by dumping the CCU bus gates on a running appliance:
+# BUS_CLK_GATING_REG1 (0x01c20064) read 0x00001000 and BUS_SOFT_RST_REG1
+# (0x01c202c4) read the same — bit 12 is `bus-de`, the Display Engine, clocked
+# AND out of reset. Nothing in Linux touches it (CONFIG_DRM/FB are off in
+# usbproxy-trim.cfg), so this is U-Boot's video stack left switched on: it
+# ungates DE at probe and the DRM-less kernel never gates it back. PLL_DE
+# itself is off, so this is only the AHB clock feeding an idle block, but it
+# is free to switch off. Assert reset first, then gate — the reverse of the
+# bring-up order.
+#
+# The root fix is to stop U-Boot enabling it at all (drop CONFIG_VIDEO from the
+# U-Boot fragment), which would also save it during the boot window; that needs
+# a U-Boot rebuild and a reflash, so it is not done here.
+de_off() {
+	command -v devmem >/dev/null 2>&1 || return 0
+	v=$(devmem 0x01c202c4)
+	devmem 0x01c202c4 32 "$(printf '0x%x' $(( v & ~0x1000 )))"
+	v=$(devmem 0x01c20064)
+	devmem 0x01c20064 32 "$(printf '0x%x' $(( v & ~0x1000 )))"
+}
+
+# Raise the ceiling before onlining, so the woken core never runs a burst at the
+# low OPP; drop the core before lowering the ceiling, for the same reason.
+wind_up() {
+	echo "$FREQ_HIGH" > "$POLICY/scaling_max_freq" 2>/dev/null
+	[ -w "$SPARE_CPU" ] && echo 1 > "$SPARE_CPU"
+	return 0
+}
+
+wind_down() {
+	[ -w "$SPARE_CPU" ] && echo 0 > "$SPARE_CPU"
+	echo "$FREQ_LOW" > "$POLICY/scaling_max_freq" 2>/dev/null
+	return 0
+}
+
+case "${1:-boot}" in
+active)
+	wind_up
+	;;
+idle)
+	wind_down
+	;;
+boot)
+	# --- CPU: offline spare cores -----------------------------------------
+	# The Allwinner H2+ is a quad Cortex-A7. usb-proxy is USB-I/O-bound (its
+	# threads spend their time blocked on USB transfers, not computing), so
+	# two cores comfortably saturate USB 2.0 — a 4-core A/B showed no gain
+	# (MUSB-BULK-OUT.md). cpu2/cpu3 are offlined for good here; cpu1 is the
+	# one the active/idle hooks toggle. CPU hotplug is supported on mainline
+	# sunxi H3.
+	for c in 2 3; do
+		node="/sys/devices/system/cpu/cpu$c/online"
+		[ -w "$node" ] && echo 0 > "$node"
+	done
+
+	# --- CPU: performance governor ----------------------------------------
+	# schedutil's per-packet ramping adds real latency to the ADB round trip:
+	# measured 2.2-2.9MB/s push with schedutil vs a steady 3.2-3.3MB/s with
+	# performance (pre-accelerator numbers). Keep `performance` and let the
+	# active/idle hooks move the ceiling instead — that way a transfer runs
+	# at a steady 816MHz with no ramping, exactly as before.
+	echo performance > "$POLICY/scaling_governor"
+
+	ephy_leds_off
+	de_off
+
+	# Boot ends wound up: usb-proxy's monitor thread winds down once it has
+	# seen power_idle_ms of quiet. If usb-proxy is not configured with a
+	# power_hook, this is simply the old static behaviour.
+	wind_up
+	;;
+*)
+	echo "usage: power-tune [boot|active|idle]" >&2
+	exit 1
+	;;
+esac
 
 exit 0

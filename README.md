@@ -27,9 +27,14 @@ so there's no filesystem to corrupt on power loss.
   wifi/BT, display, audio, media, RAID and on-disk filesystems — ~3.2 MB uImage,
   0 modules (`usbproxy-trim.cfg`). `CONFIG_NET` core stays because libusb's
   hotplug uses netlink.
-- **Low power.** A boot-time `power-tune` offlines 2 of the 4 A7 cores and turns
-  off the unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the
-  LEDs just needed the syscon polarity bit).
+- **Low power.** 0.70 W with a watch attached and idle, of which 0.30 W is the
+  watch itself. `power-tune` offlines 2 of the 4 A7 cores at boot, turns off the
+  unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the LEDs
+  just needed the syscon polarity bit) and gates the Display Engine that U-Boot
+  leaves clocked; usb-proxy then drives `power-tune active|idle` so the board
+  drops to a single core at 648 MHz whenever no USB traffic is flowing, and winds
+  back up on the first packet. See DEVELOPMENT.md §10 for the measurements and
+  for what is *not* worth optimising.
 - **Fast U-Boot**: `bootdelay=0`, no USB/network boot scan, Ethernet driver
   dropped — boots straight from the SD card in well under a second.
 

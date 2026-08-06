@@ -1,0 +1,36 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: disable mmc0 (SD card unused at runtime)
+
+The rootfs is an initramfs bundled into the kernel and usbproxy-trim.cfg
+compiles out EXT4_FS/FAT_FS, so Linux never mounts anything from the SD card -
+`mount | grep mmc` on a running appliance is empty. The controller was still
+probing and staying clocked for the whole uptime: BUS_CLK_GATING_REG0
+(0x01c20060) read 0x22800040 with bit 6 (mmc0) set, and the sunxi-mmc interrupt
+ticked over at ~1/s on an otherwise idle board (measured 2026-08-06 with
+scripts/power-probe.py).
+
+U-Boot reads the card before the kernel starts and uses its own DTB, so this
+does not affect booting. The only capability lost is poking the card from the
+running system, which nothing does.
+
+Applies on top of 0003 (appliance trim) and 0004 (CPU cap + ramoops), which
+also touch this file - hence the separate patch with post-0004 line numbers.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -179,7 +179,12 @@
+ 	vmmc-supply = <&reg_vcc3v3>;
+ 	bus-width = <4>;
+ 	cd-gpios = <&pio 5 6 GPIO_ACTIVE_LOW>; /* PF6 */
+-	status = "okay";
++	/* SD card unused at runtime: the rootfs is an initramfs bundled into
++	 * the kernel and EXT4_FS/FAT_FS are compiled out, so nothing is ever
++	 * mounted from it. U-Boot reads the card (with its own DTB) before the
++	 * kernel starts, so boot is unaffected. Leaving it enabled kept the
++	 * controller clocked and ticking for the whole uptime. */
++	status = "disabled";
+ };
+
+ &mmc1 {

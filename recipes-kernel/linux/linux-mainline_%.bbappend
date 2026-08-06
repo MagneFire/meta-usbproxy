@@ -25,6 +25,11 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    switches again (the DVFS rail transient is the prime suspect for the
 #    intermittent boot-time oopses with corrupt pointers), and reserves 128KiB
 #    for ramoops so crash logs survive the panic auto-reboot.
+#  * 0005-dts-...disable-mmc0: the SD card is never mounted at runtime (the
+#    rootfs is a kernel-bundled initramfs and the on-disk filesystems are
+#    compiled out), but the controller stayed clocked and interrupting for the
+#    whole uptime. Separate from 0003 because it must apply after 0004's edits
+#    to the same file. U-Boot uses its own DTB, so boot is unaffected.
 #  * usbproxy.cfg: build raw_gadget and the musb gadget stack into the kernel
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
 #  * usbproxy-resilience.cfg: panic_on_oops + 5s panic reboot + pstore/ramoops
@@ -34,6 +39,7 @@ SRC_URI:append = " \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
     file://0003-dts-orangepi-zero-appliance-trim.patch \
     file://0004-dts-orangepi-zero-cap-cpu-816-add-ramoops.patch \
+    file://0005-dts-orangepi-zero-disable-mmc0.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

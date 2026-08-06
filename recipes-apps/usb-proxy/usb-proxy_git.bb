@@ -16,8 +16,11 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # opi branch HEAD (carries the sunxi musb fixes, the NO_DEVICE _exit-on-
 # disconnect fix, drain-before-exit so a `fastboot boot` OKAY still reaches
 # the host as the device drops off the bus, the condvar/fast-path latency
-# work and the adb_ack_accel throughput feature). Bump to advance.
-SRCREV = "56aa36a2f7eb1c6304ff4541735ec2f74e60756d"
+# work and the adb_ack_accel throughput feature, plus the idle-power work:
+# the endpoint write loop now sleeps instead of polling at 1kHz, and
+# --power_hook/--power_idle_ms drive power-tune's active/idle modes).
+# Bump to advance.
+SRCREV = "24f759e00e1874037962e2f12d16dfdfb0fc91fa"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
@@ -36,6 +39,7 @@ do_configure() {
 do_compile() {
     ${CXX} ${CXXFLAGS} -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
+        power-policy.cpp \
         ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp \
         -o usb-proxy
 }

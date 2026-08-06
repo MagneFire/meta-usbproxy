@@ -473,3 +473,55 @@ regression from the CPU cap).
 knob is DRAM 480→408 in `usbproxy-uboot.cfg` (`CONFIG_DRAM_CLK`); after that,
 suspect the 5 V supply path (powered from a host USB port = voltage droop —
 use a solid supply).
+
+## 10. Idle power
+
+Measured 2026-08-06 with a USB wattmeter on the appliance's 5 V feed, and with
+`scripts/power-probe.py` for the cheap A/B metric (wakeups/s and CPU-busy%
+sampled over the serial console — no meter needed, and it tracks the meter well).
+
+| State | Meter |
+| --- | --- |
+| Appliance alone, nothing attached | 0.40 W |
+| Appliance + watch enumerated, nothing talking to it | 0.64 W |
+| Appliance + watch + proxy idle — before this work | 0.74 W |
+| Appliance + watch + proxy idle — after | **0.70 W** |
+| Watch alone, straight to the host, idling | 0.30 W |
+
+**Where it went.** The one real software finding was in usb-proxy: `ep_loop_write`
+polled its queue with a bare `wait_for(1ms)`, so each endpoint burned 1000
+wakeups/s at complete idle. With two bulk endpoints that measured **1962
+wakeups/s and 3.34 % CPU busy** on a load-average-0.00 board. Making the wait
+predicated dropped it to **28 wakeups/s and 0.25 %**. On top of that,
+`power-tune active|idle` (driven by usb-proxy's `power_hook`) takes the board to
+one core at 648 MHz while nothing is happening, and `power-tune boot` now gates
+the Display Engine that U-Boot leaves clocked.
+
+**Read the size of the win before doing more.** All of that together — removing
+essentially all CPU activity, offlining a core, cutting the clock 20 %, gating a
+clock domain — moved **35 mW**. The CPU/clock domain is simply not where this
+board's idle power goes; do not spend more effort there.
+
+**The USB link cost is not the appliance's to save.** Stopping the proxy with the
+watch still enumerated drops the meter to 0.64 W, so keeping the adb link alive
+costs ~65 mW. But the watch attached-and-unpolled draws 0.24 W (0.64 − 0.40), and
+0.24 + 0.065 = 0.305 W — which is exactly what the watch draws plugged straight
+into the host. That 65 mW is the watch's own cost of a live USB link and appears
+with no appliance in the path. Polling less would only trade latency for someone
+else's power.
+
+**What is left** is the ~0.40 W the board draws on its own: DRAM refresh, SoC
+leakage, and buck efficiency at ~80 mA. The remaining software lever is
+`CONFIG_DRAM_CLK` 480→408 in `usbproxy-uboot.cfg` (§9 already lists it as the next
+stability knob, so it may be worth doing on those grounds anyway). Everything else
+was already at the floor: only PLL_CPUX/PLL_DDR/PLL_PERIPH0 are enabled and every
+other PLL is off; bus gates hold only mmc0 (now disabled in DT), the OTG gadget,
+EHCI1 and OHCI1; there is no LED class and no thermal zone.
+
+**Hazard: do not hammer CPU hotplug.** 50 back-to-back `echo 0/1 >
+cpu1/online` cycles hard-reset the board — empty pstore, so a watchdog reset
+rather than an oops, almost certainly `stop_machine` starving the 2 s watchdog
+feed against its 8 s timeout. 10 cycles spaced 2 s apart were clean. The power
+policy cannot reach that rate (transitions are ≥ `power_idle_ms` apart, floored
+at 1 s in usb-proxy), but a soak loop written without a delay will reboot the
+board.
