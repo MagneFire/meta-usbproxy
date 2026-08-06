@@ -513,10 +513,31 @@ into the host. That 65 mW is the watch's own cost of a live USB link and appears
 with no appliance in the path. Polling less would only trade latency for someone
 else's power.
 
-**What is left** is the ~0.40 W the board draws on its own: DRAM refresh, SoC
-leakage, and buck efficiency at ~80 mA. The remaining software lever is
-`CONFIG_DRAM_CLK` 480→408 in `usbproxy-uboot.cfg` (§9 already lists it as the next
-stability knob, so it may be worth doing on those grounds anyway). Everything else
+**Measure this rig properly or not at all.** A USB wattmeter here flickers over a
+~40 mW band (0.30–0.34 W) with the supply itself moving 5.14–5.15 V, and with the
+watch attached there is another 0.24–0.30 W of *variable* load drifting with the
+watch's own state. Anything smaller than ~40 mW is invisible to a single
+instantaneous reading. A whole DRAM ladder was "measured" that way and produced
+confident numbers (30 mW for 480→408, 15 mW for 408→360) that were pure drift —
+the tell was 312 reading *higher* than 360, which is physically backwards, and
+reflashing 360 then reproduced the same high number. The method that works:
+
+1. Unplug the proxied device — only the SBC on the meter.
+2. Stub `usb-proxy-run` to `exec sleep 999999` so the respawn loop is gone, and
+   `power-tune idle` to pin one core at 648 MHz.
+3. Compare a **large** delta back-to-back in one sitting, and re-measure the
+   first setting at the end to prove the difference exceeds drift.
+
+Done that way, DRAM 624 vs 360 gives 0.37 W vs 0.335 W — ~35 mW over a 1.73×
+clock change, i.e. **~0.13 mW per MHz**. That is the only trustworthy DRAM number
+here; every per-step figure is interpolated from it, and each individual 48 MHz
+step (6–10 mW) is genuinely unresolvable on this meter.
+
+**What is left** is the ~0.33 W the board draws on its own (SBC alone, quiescent,
+one core at 648 MHz): DRAM refresh, SoC leakage, and buck efficiency at ~65 mA.
+`CONFIG_DRAM_CLK` is now 312, taken mainly on stability grounds — §9 already had
+it queued as the next margin knob, and at ~20 mW from 480 the power case alone
+would not have justified it. Everything else
 was already at the floor: only PLL_CPUX/PLL_DDR/PLL_PERIPH0 are enabled and every
 other PLL is off; `BUS_CLK_GATING_REG0` holds only bus-dma, the OTG gadget, EHCI1
 and OHCI1; there is no LED class and no thermal zone.
@@ -534,6 +555,15 @@ Always grep that file:
 ```sh
 grep -n -B1 '0x060, BIT(' drivers/clk/sunxi-ng/ccu-sun8i-h3.c   # and 0x064, 0x068…
 ```
+
+**With nothing attached, the appliance was busier than when working.** usb-proxy
+never starts without a device, so `power-tune boot` left the board wound up at two
+cores, and inittab respawned `usb-proxy-run` every 2 s — which forked a shell,
+scanned sysfs, and (once it started winding down) forked `power-tune` too. That
+measured **2.7 % of a core versus 0.25 % quiescent**, five times busier doing
+nothing than the proxy is when actually proxying. `usb-proxy-run` now winds down
+in that branch, but only on the transition (guarded on `cpu1/online`), which
+brings it to 0.33 %.
 
 **Hazard: do not hammer CPU hotplug.** 50 back-to-back `echo 0/1 >
 cpu1/online` cycles hard-reset the board — empty pstore, so a watchdog reset
