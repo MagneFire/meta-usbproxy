@@ -523,10 +523,22 @@ the tell was 312 reading *higher* than 360, which is physically backwards, and
 reflashing 360 then reproduced the same high number. The method that works:
 
 1. Unplug the proxied device — only the SBC on the meter.
-2. Stub `usb-proxy-run` to `exec sleep 999999` so the respawn loop is gone, and
-   `power-tune idle` to pin one core at 648 MHz.
+2. Stub `usb-proxy-run` so the respawn loop is gone, and `power-tune idle` to pin
+   one core at 648 MHz.
 3. Compare a **large** delta back-to-back in one sitting, and re-measure the
    first setting at the end to prove the difference exceeds drift.
+
+**Restoring that stub has a trap.** If the stub is `exec sleep 999999`, the exec
+replaces the shell, so the process inittab is tracking *is* `sleep` — putting the
+real `usb-proxy-run` back does nothing, because inittab is still waiting on a
+sleep that will not return for 11 days. The appliance then looks broken in a
+confusing way: the watch enumerates fine, the log's last lines say "no USB device
+attached to proxy yet", and `adb devices` is empty. `ps | grep usb-proxy-run`
+does **not** find it either (the process is named `sleep`), so that check gives
+false reassurance. Either `kill $(pidof sleep)` after restoring the file, or
+write the stub as a short loop (`while true; do sleep 5; done`) so the state
+self-heals within seconds. Confirm with `ps w | grep usb-proxy` — the real
+`/usr/bin/usb-proxy` process is the thing to look for.
 
 Done that way, DRAM 624 vs 360 gives 0.37 W vs 0.335 W — ~35 mW over a 1.73×
 clock change, i.e. **~0.13 mW per MHz**. That is the only trustworthy DRAM number
