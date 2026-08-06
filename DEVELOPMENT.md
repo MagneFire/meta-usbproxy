@@ -488,6 +488,9 @@ sampled over the serial console — no meter needed, and it tracks the meter wel
 | Appliance + watch + proxy idle — after | **0.70 W** |
 | Watch alone, straight to the host, idling | 0.30 W |
 
+Flashing the image with mmc0 disabled did not move the meter — see the decoding
+warning below.
+
 **Where it went.** The one real software finding was in usb-proxy: `ep_loop_write`
 polled its queue with a bare `wait_for(1ms)`, so each endpoint burned 1000
 wakeups/s at complete idle. With two bulk endpoints that measured **1962
@@ -515,8 +518,22 @@ leakage, and buck efficiency at ~80 mA. The remaining software lever is
 `CONFIG_DRAM_CLK` 480→408 in `usbproxy-uboot.cfg` (§9 already lists it as the next
 stability knob, so it may be worth doing on those grounds anyway). Everything else
 was already at the floor: only PLL_CPUX/PLL_DDR/PLL_PERIPH0 are enabled and every
-other PLL is off; bus gates hold only mmc0 (now disabled in DT), the OTG gadget,
-EHCI1 and OHCI1; there is no LED class and no thermal zone.
+other PLL is off; `BUS_CLK_GATING_REG0` holds only bus-dma, the OTG gadget, EHCI1
+and OHCI1; there is no LED class and no thermal zone.
+
+**Decode CCU gate bits against the driver, not from memory.** The mmc0 change was
+justified by reading `BUS_CLK_GATING_REG0` (0x01c20060) = `0x22800040` and taking
+bit 6 for mmc0. Bit 6 is **bus-dma**; mmc0 is bit 8, and bit 8 was already clear,
+so that clock was gated the whole time and disabling the node saved nothing —
+confirmed on the meter after flashing. The change was kept anyway (an appliance
+that never touches the card has no reason to carry the driver, and it does remove
+a ~1/s interrupt), but the power rationale was wrong. The Display Engine finding
+above *was* checked against `drivers/clk/sunxi-ng/ccu-sun8i-h3.c` and is correct.
+Always grep that file:
+
+```sh
+grep -n -B1 '0x060, BIT(' drivers/clk/sunxi-ng/ccu-sun8i-h3.c   # and 0x064, 0x068…
+```
 
 **Hazard: do not hammer CPU hotplug.** 50 back-to-back `echo 0/1 >
 cpu1/online` cycles hard-reset the board — empty pstore, so a watchdog reset

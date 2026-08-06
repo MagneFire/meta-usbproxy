@@ -3,11 +3,17 @@ Subject: [PATCH] dts: orangepi-zero: disable mmc0 (SD card unused at runtime)
 
 The rootfs is an initramfs bundled into the kernel and usbproxy-trim.cfg
 compiles out EXT4_FS/FAT_FS, so Linux never mounts anything from the SD card -
-`mount | grep mmc` on a running appliance is empty. The controller was still
-probing and staying clocked for the whole uptime: BUS_CLK_GATING_REG0
-(0x01c20060) read 0x22800040 with bit 6 (mmc0) set, and the sunxi-mmc interrupt
-ticked over at ~1/s on an otherwise idle board (measured 2026-08-06 with
-scripts/power-probe.py).
+`mount | grep mmc` on a running appliance is empty. The controller still probed,
+and its interrupt ticked over at ~1/s on an otherwise idle board (measured
+2026-08-06 with scripts/power-probe.py). Disabling the node removes that driver,
+that probe and that wakeup source.
+
+Do NOT expect a power saving from this: it was originally justified by a misread
+of BUS_CLK_GATING_REG0 (0x01c20060 = 0x22800040), where bit 6 was taken for mmc0.
+Bit 6 is bus-dma; mmc0 is bit 8, and bit 8 was already clear - the controller's
+bus clock was gated all along. Measured before and after on the meter: no change.
+The change is kept because an appliance that never touches the card has no reason
+to carry the driver, not because it saves power.
 
 U-Boot reads the card before the kernel starts and uses its own DTB, so this
 does not affect booting. The only capability lost is poking the card from the
