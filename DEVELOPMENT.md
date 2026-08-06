@@ -474,6 +474,32 @@ knob is DRAM 480→408 in `usbproxy-uboot.cfg` (`CONFIG_DRAM_CLK`); after that,
 suspect the 5 V supply path (powered from a host USB port = voltage droop —
 use a solid supply).
 
+**Leading theory (2026-08-06, user's, unproven but the best fit): a flaky micro-USB
+OTG connector.** Start here before touching another clock. It explains what the
+clock changes could not:
+
+- The corruption *persisted* through 624→480, through the DVFS rail fix, and
+  through 480→408. A cause that was never DRAM would behave exactly like that.
+- It was worst at boot — which is peak current draw, so peak droop across a
+  marginal contact.
+- The same connector carries **both VBUS and the gadget data path to the Mac**.
+  So it also explains the recurring stale enumerations, wedged Mac USB ports and
+  "adb can't see the device" episodes, which had been written off separately as
+  macOS USB-stack flakiness. One cause for two symptom families beats two.
+
+If this is right, the DRAM ladder and possibly the 816 MHz cap were treating a
+symptom of a bad connector. That does not make them harmful — DRAM 312 costs no
+throughput and saves ~20 mW — but it does mean **do not reach for another clock
+reduction next time**. Test the connector first:
+
+- Watch the meter's *voltage* during boot (peak current). Droop or a dip there is
+  the signal; a steady 5.14–5.15 V is not.
+- Swap the cable. Cheapest possible experiment, and cables are the usual culprit.
+- Best fix if the board's power path allows it: feed 5 V from a solid supply and
+  leave the OTG connector carrying data only, so a marginal contact can no longer
+  brown out the SoC. **Check for backfeed first** — the Mac still presents VBUS on
+  that port, and two 5 V sources meeting is its own problem.
+
 ## 10. Idle power
 
 Measured 2026-08-06 with a USB wattmeter on the appliance's 5 V feed, and with
