@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = ["pyserial"]
 # ///
-"""uboot-flash.py — write a new U-Boot to the appliance's SD over the serial console.
+"""uboot-flash.py — update the appliance's SD over the U-Boot serial console.
 
 Runs on the Mac. No card removal, and no MMC driver needed in Linux: U-Boot has
 its own, so this works even though the appliance's kernel has CONFIG_MMC=n.
@@ -12,14 +12,18 @@ Why this exists: the DRAM clock is compiled into the SPL, so every DRAM
 experiment used to mean powering down, pulling the card, carrying it to the Mac,
 bmaptool, and putting it back. This does the same job in about a minute.
 
-    # at the U-Boot prompt already (see below for how to get there):
+    # Update U-Boot itself, at the U-Boot prompt:
     uv run scripts/uboot-flash.py u-boot-sunxi-with-spl.bin
+
+    # Update one file in the FAT boot partition (kernel or DTB):
+    uv run scripts/uboot-flash.py --fat uImage uImage-initramfs.bin
+    uv run scripts/uboot-flash.py --fat sun8i-h2-plus-orangepi-zero.dtb board.dtb
 
 Getting a U-Boot prompt: CONFIG_BOOTDELAY is 0, but autoboot can still be
 interrupted by spamming a key while the board powers up. Reset the board and
 hold a key down; you want the `=>` prompt.
 
-What it does, all over the one serial line:
+For U-Boot itself it does, all over the one serial line:
 
     loady 0x42000000          # U-Boot waits for a Y-modem batch
     <this script sends the file>
@@ -29,8 +33,9 @@ What it does, all over the one serial line:
 Sector 0x10 (8 KiB) is where sunxi looks for the SPL, and it matches the wic
 layout (`part u-boot ... --align 8`). The FAT boot partition does not start until
 sector 4096, so there is a ~2 MB window here and a 521 KB U-Boot is nowhere near
-it. Nothing else on the card is touched — in particular the kernel is untouched,
-so this only changes U-Boot-level settings (DRAM clock, watchdog, bootdelay).
+it. Nothing else on the card is touched. In `--fat` mode the same verified
+transfer updates one named file in the FAT boot partition, loads it back, and
+checks its CRC before allowing a reset.
 
 Y-modem is implemented inline rather than shelling out to `sz`, so there is
 nothing to `brew install`.
@@ -48,12 +53,20 @@ LOAD_ADDR = os.environ.get("UB_ADDR", "0x42000000")
 SECTOR = 512
 SPL_SECTOR = 0x10  # sunxi SPL offset, 8 KiB
 
-if len(sys.argv) < 2:
+if len(sys.argv) == 4 and sys.argv[1] == "--fat":
+    fat_dest = sys.argv[2]
+    path = sys.argv[3]
+elif len(sys.argv) == 2:
+    fat_dest = None
+    path = sys.argv[1]
+else:
     sys.exit(__doc__)
-path = sys.argv[1]
 data = open(path, "rb").read()
 blocks = (len(data) + SECTOR - 1) // SECTOR
-print(f"{os.path.basename(path)}: {len(data)} bytes -> {blocks} sectors (0x{blocks:x})")
+if fat_dest:
+    print(f"{os.path.basename(path)}: {len(data)} bytes -> FAT /{fat_dest}")
+else:
+    print(f"{os.path.basename(path)}: {len(data)} bytes -> {blocks} sectors (0x{blocks:x})")
 
 ser = serial.Serial(DEV, 115200, timeout=1)
 
@@ -166,6 +179,29 @@ print(f"crc32 {want:08x} verified in RAM")
 
 # --- commit it to the card ---------------------------------------------------
 print(send_cmd("mmc dev 0", 1.5))
+
+if fat_dest:
+    out = send_cmd(f"fatwrite mmc 0:1 {LOAD_ADDR} {fat_dest} {len(data):x}", 8.0)
+    print(out)
+    if "bytes written" not in out.lower():
+        sys.exit("fatwrite did not report success — do NOT reset; check the console")
+
+    # Read the file through the filesystem, then check exactly its source size.
+    # This catches both a bad media write and accidentally targeting the wrong
+    # partition or filename.
+    READBACK = "0x43000000"
+    out = send_cmd(f"fatload mmc 0:1 {READBACK} {fat_dest}", 8.0)
+    print(out)
+    if "bytes read" not in out.lower():
+        sys.exit("fatload readback failed — do NOT reset; rewrite the file")
+    out = send_cmd(f"crc32 {READBACK} {len(data):x}", 3.0)
+    if f"{want:08x}" not in out.lower():
+        sys.exit(f"READBACK MISMATCH for {fat_dest} (wanted {want:08x}):\n"
+                 f"{out}\nDo NOT reset; rewrite the file.")
+    print(f"/{fat_dest} readback verified ({want:08x})")
+    ser.close()
+    sys.exit(0)
+
 out = send_cmd(f"mmc write {LOAD_ADDR} {SPL_SECTOR:x} {blocks:x}", 3.0)
 print(out)
 if "OK" not in out and "written" not in out.lower():

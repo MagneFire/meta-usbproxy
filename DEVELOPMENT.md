@@ -270,6 +270,23 @@ diskutil eject /dev/disk11
 I/O error mid-write just needs a retry. Without bmaptool:
 `zcat <image>.wic.gz | sudo dd of=/dev/rdisk11 bs=4m`.
 
+**Kernel/DT-only update over serial.** Because the runtime rootfs is bundled in
+`uImage`, most software changes do not require removing the card. Enter U-Boot,
+then YMODEM-write the bundled kernel and DTB directly to the FAT boot partition:
+
+```sh
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-console.py --catch
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py \
+    --fat uImage /path/to/uImage-initramfs-orange-pi-zero.bin
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py \
+    --fat sun8i-h2-plus-orangepi-zero.dtb /path/to/sun8i-h2-plus-orangepi-zero.dtb
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-console.py reset
+```
+
+The flasher CRC-checks each YMODEM transfer in RAM, writes the named FAT file,
+loads it back from the card, and checks the CRC again. Use the original no-flag
+form only for a U-Boot/SPL update; it writes from raw sector `0x10` instead.
+
 ---
 
 ## 7. Talking to the Orange Pi over USB serial
