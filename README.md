@@ -32,9 +32,11 @@ so there's no filesystem to corrupt on power loss.
   unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the LEDs
   just needed the syscon polarity bit) and gates the Display Engine that U-Boot
   leaves clocked; usb-proxy then drives `power-tune active|idle` so the board
-  drops to a single core at 648 MHz whenever no USB traffic is flowing, and winds
-  back up on the first packet. See DEVELOPMENT.md §10 for the measurements and
-  for what is *not* worth optimising.
+  drops to a single core at 648 MHz and lowers AHB1/APB1/MBUS to 100/50/150 MHz
+  whenever no USB traffic is flowing. It restores the exact boot clock rates
+  before winding the CPU back up on the first packet. AHB2 (the live USB host)
+  and APB2 (the recovery UART) are never changed. See DEVELOPMENT.md §10 for
+  the measurements and for what is *not* worth optimising.
 - **Fast U-Boot**: `bootdelay=0`, no USB/network boot scan, Ethernet driver
   dropped — boots straight from the SD card in well under a second.
 

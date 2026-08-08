@@ -42,6 +42,7 @@ recipes-kernel/linux/linux-mainline_%.bbappend   patches + config fragments
 recipes-kernel/linux/files/0001-musb-…rx-requeue.patch  in-tree musb bulk-OUT fix
 recipes-kernel/linux/files/0002-…force-peripheral.patch megous OTG peripheral-mode fix
 recipes-kernel/linux/files/0003-dts-…appliance-trim.patch  DT: disable ehci0/ohci0/mmc1/emac
+recipes-kernel/linux/files/0006-soc-…bus-clock-policy.patch  dynamic AHB1/APB1/MBUS policy
 recipes-kernel/linux/files/usbproxy.cfg       raw-gadget/musb/gadget/initramfs =y + quiet cmdline
 recipes-kernel/linux/files/usbproxy-trim.cfg  subsystem disables (keep NET + MODULES)
 recipes-bsp/u-boot/u-boot_%.bbappend          merges the u-boot fragment
@@ -575,10 +576,39 @@ step (6–10 mW) is genuinely unresolvable on this meter.
 one core at 648 MHz): DRAM refresh, SoC leakage, and buck efficiency at ~65 mA.
 `CONFIG_DRAM_CLK` is now 312, taken mainly on stability grounds — §9 already had
 it queued as the next margin knob, and at ~20 mW from 480 the power case alone
-would not have justified it. Everything else
-was already at the floor: only PLL_CPUX/PLL_DDR/PLL_PERIPH0 are enabled and every
-other PLL is off; `BUS_CLK_GATING_REG0` holds only bus-dma, the OTG gadget, EHCI1
-and OHCI1; there is no LED class and no thermal zone.
+would not have justified it. Only PLL_CPUX/PLL_DDR/PLL_PERIPH0 are enabled and
+every other PLL is off; `BUS_CLK_GATING_REG0` holds only bus-dma, the OTG gadget,
+EHCI1 and OHCI1; there is no LED class or thermal zone, and no LEDs are lit at
+runtime.
+
+**Dynamic bus clocks (implemented 2026-08-08; power measurement pending).**
+Kernel patch `0006` exports the H3 CCU's existing AHB1/APB1 clock IDs and adds a
+small board policy driver. `power-tune idle` now changes AHB1/APB1/MBUS to
+100/50/150 MHz through the common clock framework; `power-tune active` restores
+the exact rates captured at driver probe before CPU1 is brought online. The
+interface is:
+
+```sh
+cat /sys/devices/platform/usbproxy-bus-clocks/mode
+# active ahb1=... apb1=... mbus=...
+echo idle > /sys/devices/platform/usbproxy-bus-clocks/mode
+```
+
+The targets are deliberately conservative first-step rates, not claimed minima.
+AHB2 remains unchanged because it feeds EHCI1/OHCI1 and therefore the proxied
+watch; APB2 remains unchanged because it feeds the recovery UART. The driver
+validates that all three idle targets are exact CCF-supported rates, verifies
+the rates after every transition, and rolls all clocks back if any change
+fails. Older/recovery kernels without the sysfs node keep the prior CPU-only
+policy. Given the earlier 35 mW result for CPU/core/DE changes, expect a small
+single-digit to low-teens mW saving, but treat that only as a test hypothesis:
+the wattmeter's ~40 mW drift means it needs the back-to-back method above (or a
+higher-resolution meter) before recording a number.
+
+Functional hardware verification on 2026-08-08 passed: the driver probed with
+active AHB1/APB1/MBUS rates of 200/100/300 MHz, `power-tune idle` produced the
+exact 100/50/150 MHz targets, `power-tune active` restored all three boot rates,
+and a second idle transition restored all targets without kernel errors.
 
 **Decode CCU gate bits against the driver, not from memory.** The mmc0 change was
 justified by reading `BUS_CLK_GATING_REG0` (0x01c20060) = `0x22800040` and taking

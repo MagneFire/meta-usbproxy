@@ -1,0 +1,328 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] soc: sunxi: add usbproxy idle bus-clock policy
+
+The appliance has an active/idle policy driven by USB traffic. Add a small
+board-specific driver which moves AHB1, APB1 and MBUS through the common
+clock framework: 100/50/150 MHz at idle, and the exact probe-time rates when
+active.  AHB2 (EHCI1/OHCI1) and APB2 (the recovery UART) are deliberately not
+touched.
+
+AHB1 and APB1 already exist in the H3 CCU onecell table at reserved indices,
+but were not exported in the DT binding.  Name those existing indices so the
+board policy node can acquire the clocks normally rather than poking CCU
+registers behind the clock framework's back.
+
+Upstream-Status: Inappropriate [board-specific appliance policy]
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+ arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts |  11 ++
+ drivers/clk/sunxi-ng/ccu-sun8i-h3.h                         |   6 +-
+ drivers/soc/sunxi/Kconfig                                   |  12 ++
+ drivers/soc/sunxi/Makefile                                  |   1 +
+ drivers/soc/sunxi/usbproxy_bus_clocks.c                     | 220 +++++++++++++++++++++++++++
+ include/dt-bindings/clock/sun8i-h3-ccu.h                    |   5 +
+ 6 files changed, 251 insertions(+), 4 deletions(-)
+
+--- a/include/dt-bindings/clock/sun8i-h3-ccu.h
++++ b/include/dt-bindings/clock/sun8i-h3-ccu.h
+@@ -13,6 +13,11 @@
+ 
+ #define CLK_CPUX		14
+ 
++#define CLK_AHB1		16
++#define CLK_APB1		17
++#define CLK_APB2		18
++#define CLK_AHB2		19
++
+ #define CLK_BUS_CE		20
+ #define CLK_BUS_DMA		21
+ #define CLK_BUS_MMC0		22
+--- a/drivers/clk/sunxi-ng/ccu-sun8i-h3.h
++++ b/drivers/clk/sunxi-ng/ccu-sun8i-h3.h
+@@ -31,10 +31,8 @@
+ /* The CPUX clock is exported */
+ 
+ #define CLK_AXI			15
+-#define CLK_AHB1		16
+-#define CLK_APB1		17
+-#define CLK_APB2		18
+-#define CLK_AHB2		19
++
++/* The AHB1/APB1/APB2/AHB2 clocks are exported */
+ 
+ /* All the bus gates are exported */
+ 
+--- a/drivers/soc/sunxi/Kconfig
++++ b/drivers/soc/sunxi/Kconfig
+@@ -25,3 +25,15 @@ config SUN20I_PPU
+ 	help
+ 	  Say y to enable the PPU power domain driver. This saves power
+ 	  when certain peripherals, such as the video engine, are idle.
++
++config USBPROXY_BUS_CLOCKS
++	bool "USB-proxy appliance bus-clock policy"
++	depends on ARCH_SUNXI && OF
++	help
++	  Build the board-specific bus-clock policy used by the Orange Pi Zero
++	  USB-proxy appliance. The policy exposes an active/idle sysfs control
++	  and changes AHB1, APB1 and MBUS rates through the common clock
++	  framework. It leaves AHB2, which feeds the USB host controllers, and
++	  APB2, which feeds the recovery UART, unchanged.
++
++	  If unsure, say N.
+--- a/drivers/soc/sunxi/Makefile
++++ b/drivers/soc/sunxi/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ obj-$(CONFIG_SUNXI_MBUS) +=	sunxi_mbus.o
+ obj-$(CONFIG_SUNXI_SRAM) +=	sunxi_sram.o
++obj-$(CONFIG_USBPROXY_BUS_CLOCKS) += usbproxy_bus_clocks.o
+--- /dev/null
++++ b/drivers/soc/sunxi/usbproxy_bus_clocks.c
+@@ -0,0 +1,220 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Dynamic bus-clock policy for the Orange Pi Zero USB-proxy appliance. */
++
++#include <linux/clk.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/property.h>
++#include <linux/sysfs.h>
++
++struct usbproxy_bus_clocks {
++	struct clk *ahb1;
++	struct clk *apb1;
++	struct clk *mbus;
++	unsigned long active_ahb1;
++	unsigned long active_apb1;
++	unsigned long active_mbus;
++	unsigned long idle_ahb1;
++	unsigned long idle_apb1;
++	unsigned long idle_mbus;
++	struct mutex lock;
++	bool idle;
++};
++
++static int usbproxy_validate_rate(struct device *dev, struct clk *clk,
++				  const char *name, unsigned long rate)
++{
++	long rounded;
++
++	rounded = clk_round_rate(clk, rate);
++	if (rounded < 0)
++		return dev_err_probe(dev, (int)rounded,
++				     "cannot round %s rate\n", name);
++	if (rounded != rate)
++		return dev_err_probe(dev, -EINVAL,
++				     "%s target %lu rounds to %ld\n",
++				     name, rate, rounded);
++
++	return 0;
++}
++
++static void usbproxy_restore_rates(struct device *dev,
++				   struct usbproxy_bus_clocks *policy,
++				   unsigned long ahb1, unsigned long apb1,
++				   unsigned long mbus)
++{
++	int ret;
++
++	ret = clk_set_rate(policy->mbus, mbus);
++	if (ret)
++		dev_err(dev, "failed to roll MBUS back to %lu Hz: %d\n", mbus, ret);
++	ret = clk_set_rate(policy->ahb1, ahb1);
++	if (ret)
++		dev_err(dev, "failed to roll AHB1 back to %lu Hz: %d\n", ahb1, ret);
++	ret = clk_set_rate(policy->apb1, apb1);
++	if (ret)
++		dev_err(dev, "failed to roll APB1 back to %lu Hz: %d\n", apb1, ret);
++}
++
++static int usbproxy_set_idle(struct device *dev,
++			     struct usbproxy_bus_clocks *policy, bool idle)
++{
++	unsigned long old_ahb1 = clk_get_rate(policy->ahb1);
++	unsigned long old_apb1 = clk_get_rate(policy->apb1);
++	unsigned long old_mbus = clk_get_rate(policy->mbus);
++	unsigned long ahb1 = idle ? policy->idle_ahb1 : policy->active_ahb1;
++	unsigned long apb1 = idle ? policy->idle_apb1 : policy->active_apb1;
++	unsigned long mbus = idle ? policy->idle_mbus : policy->active_mbus;
++	int ret;
++
++	/* Raise the memory fabric first; when lowering, either order is safe. */
++	ret = clk_set_rate(policy->mbus, mbus);
++	if (ret)
++		goto fail;
++	ret = clk_set_rate(policy->ahb1, ahb1);
++	if (ret)
++		goto fail;
++	ret = clk_set_rate(policy->apb1, apb1);
++	if (ret)
++		goto fail;
++
++	if (clk_get_rate(policy->ahb1) != ahb1 ||
++	    clk_get_rate(policy->apb1) != apb1 ||
++	    clk_get_rate(policy->mbus) != mbus) {
++		ret = -ERANGE;
++		goto fail;
++	}
++
++	policy->idle = idle;
++	return 0;
++
++fail:
++	dev_err(dev, "failed to enter %s mode: %d\n",
++		idle ? "idle" : "active", ret);
++	usbproxy_restore_rates(dev, policy, old_ahb1, old_apb1, old_mbus);
++	return ret;
++}
++
++static ssize_t mode_show(struct device *dev, struct device_attribute *attr,
++			 char *buf)
++{
++	struct usbproxy_bus_clocks *policy = dev_get_drvdata(dev);
++	ssize_t len;
++
++	mutex_lock(&policy->lock);
++	len = sysfs_emit(buf, "%s ahb1=%lu apb1=%lu mbus=%lu\n",
++			 policy->idle ? "idle" : "active",
++			 clk_get_rate(policy->ahb1), clk_get_rate(policy->apb1),
++			 clk_get_rate(policy->mbus));
++	mutex_unlock(&policy->lock);
++
++	return len;
++}
++
++static ssize_t mode_store(struct device *dev, struct device_attribute *attr,
++			  const char *buf, size_t count)
++{
++	struct usbproxy_bus_clocks *policy = dev_get_drvdata(dev);
++	bool idle;
++	int ret;
++
++	if (sysfs_streq(buf, "idle"))
++		idle = true;
++	else if (sysfs_streq(buf, "active"))
++		idle = false;
++	else
++		return -EINVAL;
++
++	mutex_lock(&policy->lock);
++	ret = policy->idle == idle ? 0 : usbproxy_set_idle(dev, policy, idle);
++	mutex_unlock(&policy->lock);
++
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_RW(mode);
++
++static struct attribute *usbproxy_bus_clock_attrs[] = {
++	&dev_attr_mode.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(usbproxy_bus_clock);
++
++static int usbproxy_bus_clocks_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct usbproxy_bus_clocks *policy;
++	u32 rate;
++	int ret;
++
++	policy = devm_kzalloc(dev, sizeof(*policy), GFP_KERNEL);
++	if (!policy)
++		return -ENOMEM;
++
++	policy->ahb1 = devm_clk_get(dev, "ahb1");
++	if (IS_ERR(policy->ahb1))
++		return dev_err_probe(dev, PTR_ERR(policy->ahb1), "cannot get AHB1\n");
++	policy->apb1 = devm_clk_get(dev, "apb1");
++	if (IS_ERR(policy->apb1))
++		return dev_err_probe(dev, PTR_ERR(policy->apb1), "cannot get APB1\n");
++	policy->mbus = devm_clk_get(dev, "mbus");
++	if (IS_ERR(policy->mbus))
++		return dev_err_probe(dev, PTR_ERR(policy->mbus), "cannot get MBUS\n");
++
++	ret = device_property_read_u32(dev, "usbproxy,idle-ahb1-hz", &rate);
++	if (ret)
++		return dev_err_probe(dev, ret, "missing idle AHB1 rate\n");
++	policy->idle_ahb1 = rate;
++	ret = device_property_read_u32(dev, "usbproxy,idle-mbus-hz", &rate);
++	if (ret)
++		return dev_err_probe(dev, ret, "missing idle MBUS rate\n");
++	policy->idle_mbus = rate;
++	policy->idle_apb1 = policy->idle_ahb1 / 2;
++
++	ret = usbproxy_validate_rate(dev, policy->ahb1, "AHB1",
++				     policy->idle_ahb1);
++	if (ret)
++		return ret;
++	ret = usbproxy_validate_rate(dev, policy->apb1, "APB1",
++				     policy->idle_apb1);
++	if (ret)
++		return ret;
++	ret = usbproxy_validate_rate(dev, policy->mbus, "MBUS",
++				     policy->idle_mbus);
++	if (ret)
++		return ret;
++
++	policy->active_ahb1 = clk_get_rate(policy->ahb1);
++	policy->active_apb1 = clk_get_rate(policy->apb1);
++	policy->active_mbus = clk_get_rate(policy->mbus);
++	mutex_init(&policy->lock);
++	platform_set_drvdata(pdev, policy);
++
++	dev_info(dev, "active AHB1/APB1/MBUS %lu/%lu/%lu Hz; idle %lu/%lu/%lu Hz\n",
++		 policy->active_ahb1, policy->active_apb1, policy->active_mbus,
++		 policy->idle_ahb1, policy->idle_apb1, policy->idle_mbus);
++	return 0;
++}
++
++static const struct of_device_id usbproxy_bus_clocks_of_match[] = {
++	{ .compatible = "usbproxy,h2-plus-bus-clock-policy" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, usbproxy_bus_clocks_of_match);
++
++static struct platform_driver usbproxy_bus_clocks_driver = {
++	.probe = usbproxy_bus_clocks_probe,
++	.driver = {
++		.name = "usbproxy-bus-clocks",
++		.of_match_table = usbproxy_bus_clocks_of_match,
++		.dev_groups = usbproxy_bus_clock_groups,
++	},
++};
++module_platform_driver(usbproxy_bus_clocks_driver);
++
++MODULE_DESCRIPTION("USB-proxy appliance sunxi bus-clock policy");
++MODULE_LICENSE("GPL");
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -43,5 +43,6 @@
+ #include "sunxi-common-regulators.dtsi"
+ 
++#include <dt-bindings/clock/sun8i-h3-ccu.h>
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
+ 
+@@ -116,6 +117,16 @@
+ 		reset-gpios = <&r_pio 0 7 GPIO_ACTIVE_LOW>;
+ 		post-power-on-delay-ms = <50>;
+ 	};
++
++	usbproxy_bus_clocks: usbproxy-bus-clocks {
++		compatible = "usbproxy,h2-plus-bus-clock-policy";
++		clocks = <&ccu CLK_AHB1>, <&ccu CLK_APB1>, <&ccu CLK_MBUS>;
++		clock-names = "ahb1", "apb1", "mbus";
++
++		/* Preserve AHB2 for EHCI1/OHCI1 and APB2 for the recovery UART. */
++		usbproxy,idle-ahb1-hz = <100000000>;
++		usbproxy,idle-mbus-hz = <150000000>;
++	};
+ };
+ 
+ &cpu0 {

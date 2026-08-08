@@ -34,12 +34,15 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
 #  * usbproxy-resilience.cfg: panic_on_oops + 5s panic reboot + pstore/ramoops
 #    (pairs with the 0004 reserved-memory node).
+#  * 0006-soc-...bus-clock-policy: clock-framework-backed active/idle control
+#    for AHB1/APB1 and MBUS. AHB2 (USB host) and APB2 (UART) stay unchanged.
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
     file://0003-dts-orangepi-zero-appliance-trim.patch \
     file://0004-dts-orangepi-zero-cap-cpu-816-add-ramoops.patch \
     file://0005-dts-orangepi-zero-disable-mmc0.patch \
+    file://0006-soc-sunxi-add-usbproxy-bus-clock-policy.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

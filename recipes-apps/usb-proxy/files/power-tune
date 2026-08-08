@@ -18,6 +18,7 @@
 
 POLICY=/sys/devices/system/cpu/cpufreq/policy0
 SPARE_CPU=/sys/devices/system/cpu/cpu1/online
+BUS_CLOCK_MODE=/sys/devices/platform/usbproxy-bus-clocks/mode
 
 # The OPP table has exactly two entries after kernel patch 0004 deleted the
 # 1008MHz one. Both run at 1.1V (vdd-cpux is a two-state GPIO regulator and only
@@ -28,6 +29,16 @@ SPARE_CPU=/sys/devices/system/cpu/cpu1/online
 # governor stays `performance` throughout.
 FREQ_HIGH=816000
 FREQ_LOW=648000
+
+# The kernel driver owns the CCU clocks so Linux's common clock framework stays
+# in sync. Idle is AHB1/APB1 100/50 MHz and MBUS 150 MHz; active restores the
+# exact rates captured when the driver probed. AHB2 (EHCI1/OHCI1) and APB2
+# (recovery UART) are never touched. Older/recovery kernels simply lack this
+# node, in which case the existing CPU policy continues to work unchanged.
+bus_clocks() {
+	[ -w "$BUS_CLOCK_MODE" ] || return 0
+	echo "$1" > "$BUS_CLOCK_MODE" 2>/dev/null || return 0
+}
 
 # --- Ethernet: turn off the unused PHY's RJ45 LEDs ----------------------------
 # The H3 internal Ethernet PHY is already at its lowest-power state at boot: its
@@ -70,6 +81,7 @@ de_off() {
 # Raise the ceiling before onlining, so the woken core never runs a burst at the
 # low OPP; drop the core before lowering the ceiling, for the same reason.
 wind_up() {
+	bus_clocks active
 	echo "$FREQ_HIGH" > "$POLICY/scaling_max_freq" 2>/dev/null
 	[ -w "$SPARE_CPU" ] && echo 1 > "$SPARE_CPU"
 	return 0
@@ -78,6 +90,7 @@ wind_up() {
 wind_down() {
 	[ -w "$SPARE_CPU" ] && echo 0 > "$SPARE_CPU"
 	echo "$FREQ_LOW" > "$POLICY/scaling_max_freq" 2>/dev/null
+	bus_clocks idle
 	return 0
 }
 
