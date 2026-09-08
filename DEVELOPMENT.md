@@ -572,7 +572,7 @@ check, suspect the 5 V supply path (powered from a host USB port = voltage
 droop — use a solid supply).
 
 **Root cause found for one class of these (2026-09-08): the SPL misdetects the
-DRAM size.** Boot log: SPL banner `DRAM: 512 MiB` on this 256 MiB board, then
+DRAM size.** (Not all of them; see the soak note at the end of this block.) Boot log: SPL banner `DRAM: 512 MiB` on this 256 MiB board, then
 at 0.34 s a NULL deref at 0x80 in `free_unref_page_prepare` from
 `free_reserved_area` / `kernel_init`, i.e. while freeing `.init`. Decoded
 against the build's `vmlinux`/`System.map`: `r4` is the `struct page`
@@ -608,9 +608,19 @@ Consequences worth knowing:
   proper never ran" hang, previously blamed on a corrupt flash.
 - With older kernel layouts the console header/text landed on `struct page`s of
   free pages just above the kernel instead of an `.init` page: random free-list
-  corruption, surfacing as the "clear_page at a garbage address" oopses. This is
-  the first explanation that fits every symptom, but it is inferred, not
-  observed.
+  corruption, surfacing as the "clear_page at a garbage address" oopses. That
+  is inferred, not observed, and the soak below says it is **not the whole
+  story**.
+- **Soak with the patched SPL (2026-09-08, warm reboots over serial):** 23/23
+  boots printed `DRAM: 256 MiB` and pstore records now survive reboots. But
+  boot 2 still oopsed at 0.73 s: `power-tune` (pid 78) in `mt_find` from
+  `find_vma` during its own `execve`, node pointer `0x0004448d`, i.e. a
+  corrupted maple-tree node in a freshly created mm. That is the classic
+  random-pointer signature on a boot whose DRAM size was right, so the
+  misdetection explains the `free_initmem` crash and the pstore losses, not
+  every corruption. The remaining suspects are unchanged: supply/connector
+  droop at boot and marginal DRAM. Full record: `dmesg-ramoops-0/1` on the
+  board from that boot.
 - **First thing to check in any boot log: the `DRAM:` line.** If it is not
   256 MiB, nothing after it is meaningful.
 - If a 512 banner ever appears with the patch in place, the next step is a hard
