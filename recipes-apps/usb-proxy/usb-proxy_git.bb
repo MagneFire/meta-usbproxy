@@ -26,7 +26,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # itself (100 ms, sysfs only) with a --settle_ms debounce, and stamps its
 # milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8).
 # Bump to advance.
-SRCREV = "60b3411244881a054532ecc07608269383061e1a"
+SRCREV = "1e1c1357a157f30471b5b34d891f6fc7eb1498e1"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
