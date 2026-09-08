@@ -20,8 +20,15 @@ bmaptool, and putting it back. This does the same job in about a minute.
     uv run scripts/uboot-flash.py --fat sun8i-h2-plus-orangepi-zero.dtb board.dtb
 
 Getting a U-Boot prompt: CONFIG_BOOTDELAY is 0, but autoboot can still be
-interrupted by spamming a key while the board powers up. Reset the board and
-hold a key down; you want the `=>` prompt.
+interrupted by spamming a key while the board powers up. Either reset the board
+and hold a key (then run this without --catch), or pass --catch to have this
+script reboot the board and catch the prompt itself, in the same serial
+session:
+
+    uv run scripts/uboot-flash.py --catch --fat uImage uImage-initramfs.bin
+
+Without --catch the script confirms it is at `=>` before sending anything and
+aborts if it is not, so a missed catch never runs blind against the card.
 
 For U-Boot itself it does, all over the one serial line:
 
@@ -53,12 +60,16 @@ LOAD_ADDR = os.environ.get("UB_ADDR", "0x42000000")
 SECTOR = 512
 SPL_SECTOR = 0x10  # sunxi SPL offset, 8 KiB
 
-if len(sys.argv) == 4 and sys.argv[1] == "--fat":
-    fat_dest = sys.argv[2]
-    path = sys.argv[3]
-elif len(sys.argv) == 2:
+argv = sys.argv[1:]
+catch = "--catch" in argv
+argv = [a for a in argv if a != "--catch"]
+
+if len(argv) == 3 and argv[0] == "--fat":
+    fat_dest = argv[1]
+    path = argv[2]
+elif len(argv) == 1:
     fat_dest = None
-    path = sys.argv[1]
+    path = argv[0]
 else:
     sys.exit(__doc__)
 data = open(path, "rb").read()
@@ -122,8 +133,71 @@ def send_block(seq, payload):
     sys.exit(f"block {seq} not acknowledged after 10 attempts")
 
 
+# --- make sure we are actually at the `=>` prompt before writing anything ----
+# The earlier version printed "(assuming => prompt)" and sent loady regardless;
+# when --catch failed to interrupt autoboot, the loady went to a booting Linux
+# and only the CRC handshake timeout below caught it. Confirm the prompt here
+# and refuse to go further without it, so a missed catch never runs blind at
+# the card. --catch and the write are one serial session now, so the prompt
+# state cannot be lost between two script invocations.
+def confirm_prompt(tries=3):
+    """Return True once a bare CR echoes the U-Boot `=>` prompt back."""
+    for _ in range(tries):
+        ser.reset_input_buffer()
+        ser.write(b"\r\n")
+        ser.flush()
+        time.sleep(0.4)
+        if b"=>" in ser.read(ser.in_waiting or 1):
+            return True
+    return False
+
+
+def catch_prompt(timeout=30):
+    """Reboot the board and hammer a key until autoboot drops to `=>`.
+
+    Same method as uboot-console.py --catch: a printable char each poll breaks
+    the (bootdelay=0) autoboot window, which is still interruptible."""
+    saved_timeout = ser.timeout
+    ser.timeout = 0.05
+    # Kick Linux over. Harmless at a login prompt (it ignores the command).
+    ser.write(b"\n")
+    time.sleep(0.3)
+    ser.write(b"root\n")
+    time.sleep(0.8)
+    ser.write(b"reboot -f\n")
+    ser.flush()
+    buf = b""
+    end = time.time() + timeout
+    got = False
+    while time.time() < end:
+        ser.write(b"a")
+        d = ser.read(ser.in_waiting or 1)
+        if d:
+            buf += d
+            if b"=>" in buf[-200:]:
+                got = True
+                break
+        time.sleep(0.004)
+    time.sleep(0.5)
+    ser.write(b"\x03")  # clear the line of accumulated spam
+    ser.flush()
+    time.sleep(0.5)
+    ser.reset_input_buffer()
+    ser.timeout = saved_timeout
+    return got
+
+
+if catch:
+    if not catch_prompt():
+        sys.exit("did not reach the `=>` prompt within 30s — nothing written")
+    print("at U-Boot prompt (caught)")
+elif not confirm_prompt():
+    sys.exit(
+        "not at the `=>` prompt — nothing written. Reset the board and spam a "
+        "key to catch it, or re-run with --catch to reboot and catch it here."
+    )
+
 # --- hand U-Boot the loady command, then speak Y-modem at it -----------------
-print(send_cmd("").strip()[-60:] or "(no prompt echo; assuming => prompt)")
 ser.reset_input_buffer()
 ser.write(f"loady {LOAD_ADDR}\n".encode())
 ser.flush()

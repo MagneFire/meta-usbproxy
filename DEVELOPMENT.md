@@ -276,15 +276,14 @@ I/O error mid-write just needs a retry. Without bmaptool:
 then YMODEM-write the bundled kernel and DTB directly to the FAT boot partition:
 
 ```sh
-PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-console.py --catch
-PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py \
+PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py --catch \
     --fat uImage /path/to/uImage-initramfs-orange-pi-zero.bin
 PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py \
     --fat sun8i-h2-plus-orangepi-zero.dtb /path/to/sun8i-h2-plus-orangepi-zero.dtb
 PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-console.py reset
 ```
 
-The flasher CRC-checks each YMODEM transfer in RAM, writes the named FAT file,
+`--catch` reboots the board and catches the `=>` prompt in the same session; without it the flasher confirms the prompt first and aborts if it is not there (so a missed catch never writes blind — the trap that briefly looked like a bad flash on 2026-09-08). The flasher CRC-checks each YMODEM transfer in RAM, writes the named FAT file,
 loads it back from the card, and checks the CRC again. Use the original no-flag
 form only for a U-Boot/SPL update; it writes from raw sector `0x10` instead.
 
