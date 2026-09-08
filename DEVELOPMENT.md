@@ -400,11 +400,15 @@ the DRAM-droop issue in §8).
 - **`CONFIG_SYS_BOOTM_LEN=0x4000000`.** The bundled uImage exceeds u-boot's default
   ~8 MB bootm load limit (it was ~10 MB pre-trim → `uncompress error -28`). Keep
   the headroom even though the trimmed image is now ~6 MB.
-- **`CONFIG_DRAM_CLK=480`** (down from the 624 default). Intermittent boot-time
-  kernel oopses with corrupt pointers (e.g. a page-clear faulting at a garbage
-  address) are marginal-DRAM / voltage-droop memory corruption, not a software
-  bug — likely because the board is powered over the micro-USB host port. 480 MHz
-  gives timing margin. Best paired with a solid 5 V supply.
+- **`CONFIG_DRAM_CLK=312`** (down from the 624 default via 480). Originally
+  taken against intermittent boot-time kernel oopses with corrupt pointers (e.g.
+  a page-clear faulting at a garbage address), read at the time as marginal-DRAM
+  / voltage-droop corruption. The 2026-09-08 finding (§9, "DRAM size
+  misdetection") is a better fit for those oopses; 312 stays because it costs
+  nothing and adds margin. Best paired with a solid 5 V supply.
+- **The SPL banner must say `DRAM: 256 MiB`.** `512 MiB` on this board is a
+  misdetection, fixed by U-Boot patch
+  `0001-sunxi-dw-dram-use-pattern-based-size-detection.patch`. See §9.
 
 **USB / runtime**
 
@@ -562,13 +566,60 @@ the WDT armed at power-on; 10/10 warm-reboot soak with zero oopses (boot was
 the historical crash window); 10 MB `adb push` 2.6–2.7 MB/s md5-exact (no
 regression from the CPU cap).
 
-**If corruption recurs at 816 MHz** (check pstore for the signature): the next
-knob is DRAM 480→408 in `usbproxy-uboot.cfg` (`CONFIG_DRAM_CLK`); after that,
-suspect the 5 V supply path (powered from a host USB port = voltage droop —
-use a solid supply).
+**If corruption recurs at 816 MHz**: check the SPL `DRAM:` banner first (see
+below), then pstore for the signature. DRAM is at 312 already; after the size
+check, suspect the 5 V supply path (powered from a host USB port = voltage
+droop — use a solid supply).
 
-**Leading theory (2026-08-06, user's, unproven but the best fit): a flaky micro-USB
-OTG connector.** Start here before touching another clock. It explains what the
+**Root cause found for one class of these (2026-09-08): the SPL misdetects the
+DRAM size.** Boot log: SPL banner `DRAM: 512 MiB` on this 256 MiB board, then
+at 0.34 s a NULL deref at 0x80 in `free_unref_page_prepare` from
+`free_reserved_area` / `kernel_init`, i.e. while freeing `.init`. Decoded
+against the build's `vmlinux`/`System.map`: `r4` is the `struct page`
+(`0xdfc10000` = phys `0x5fc10000`), `r8` the pfn (`0x40b00` = `c0b00000`, an
+`.init` page), and `page->flags >> 30` selected the empty `ZONE_HIGHMEM`, whose
+`pageblock_flags` is NULL. `0x5fc10000` minus 256 MiB is `0x4fc10000`: the
+ramoops **console zone** (base `0x4fc00000` + two 32 KiB dump zones). The
+ramoops header signature `0x43474244` ("DBGC") has bits 31:30 = 01 = zone 1.
+So the upper 256 MiB was a mirror of the lower, the kernel (told 512 MiB by
+U-Boot) put `mem_map` at the top of the phantom half, and ramoops wrote its
+header through the mirror onto a `struct page`.
+
+Why U-Boot says 512: `arch/arm/mach-sunxi/dram_sunxi_dw.c` sizes DRAM with
+aliasing tests, one write pair per row/bank/page step, as the very first
+accesses after the controller is reconfigured. Miss the alias once at
+`row_bits = 14` and the loop settles on 15 = 512 MiB. U-Boot proper does not
+re-measure (it reads the SPL header) and writes 512 MiB into the DT memory
+node. Upstream saw the identical "detected double the size" flake on H616 and
+fixed it with a 16-word pattern test (v2025.07, `38080293867`), but only wired
+it into the H6/H616 helper; the fix here is a port of that to the H3 driver
+(`recipes-bsp/u-boot/files/0001-sunxi-dw-dram-use-pattern-based-size-detection.patch`).
+Armbian carries the same upstream patch and an H6-only settle delay; it has
+nothing extra for H3.
+
+Consequences worth knowing:
+
+- **Any boot whose banner says 512 MiB can never keep a pstore record**:
+  `memmap_init` writes `mem_map` through the mirror over the whole ramoops
+  region before ramoops probes, so "empty pstore after a crash" is not evidence
+  of a watchdog reset on such boots.
+- A flake in the bank/page-size loops aliases *inside* the lower 256 MiB and
+  corrupts U-Boot proper itself — the 2026-08-06 "SPL printed 512 MiB and U-Boot
+  proper never ran" hang, previously blamed on a corrupt flash.
+- With older kernel layouts the console header/text landed on `struct page`s of
+  free pages just above the kernel instead of an `.init` page: random free-list
+  corruption, surfacing as the "clear_page at a garbage address" oopses. This is
+  the first explanation that fits every symptom, but it is inferred, not
+  observed.
+- **First thing to check in any boot log: the `DRAM:` line.** If it is not
+  256 MiB, nothing after it is meaningful.
+- If a 512 banner ever appears with the patch in place, the next step is a hard
+  expected-size guard in the SPL (retry the DRAM init, then reset), not another
+  clock reduction.
+
+**Earlier theory (2026-08-06, user's, unproven): a flaky micro-USB OTG
+connector.** Demoted by the finding above, but not excluded — it would still
+explain the stale enumerations and wedged Mac USB ports. It explains what the
 clock changes could not:
 
 - The corruption *persisted* through 624→480, through the DVFS rail fix, and

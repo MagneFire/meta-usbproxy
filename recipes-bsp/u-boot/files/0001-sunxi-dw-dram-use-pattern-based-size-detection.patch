@@ -1,0 +1,159 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] sunxi: dw dram: use a 16-word pattern for size detection
+
+Port of upstream 38080293867 ("sunxi: H616: dram: Improve address wrapping
+detection", Jernej Skrabec, v2025.07) to the H3/H2+/A64/R40 DesignWare driver.
+Upstream only wired it into dram_dw_helpers.c (H6/H616); dram_sunxi_dw.c
+still uses a single write pair per aliasing test.
+
+On the Orange Pi Zero (256 MiB, single x16 chip) that single test
+intermittently misses the alias at the row_bits = 14 step and the SPL then
+reports "DRAM: 512 MiB". The upper half is a mirror of the lower half, Linux
+puts mem_map at the top of "512 MiB", and the ramoops console header written
+at 0x4fc10000 lands through the mirror on the struct page of an .init page,
+which panics free_initmem() with a NULL pageblock_flags deref at 0x80. A flake
+in the bank/page-size loops instead aliases inside the lower 256 MiB and
+corrupts U-Boot proper before it ever prints.
+
+Upstream's commit message: "checking just one write is not enough. Due to
+unexplained reasons scan procedure detected double the size. By making 16
+dword writes and comparisons that never happens." Do the same here: write 16
+address-derived words at the rank base after each mctl_set_cr(), require all
+16 to read back at base + offset, and save/restore the overwritten words
+(upstream f1e6a718eba, so ramoops/soft-reset data survives). Also let the
+remapped controller settle for 50 us before the first accesses, as Armbian
+does for H6 (Allwinner-Fix-incorrect-ram-size-detection-for-H6-boards.patch).
+
+The driver-local mctl_mem_matches_base() copy is dropped with its last user;
+the dram_helpers.c one is untouched.
+
+Upstream-Status: Inappropriate [adaptation to an old branch; the upstream
+helper is tied to the newer dram_config/mctl_core_init interface]
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+ arch/arm/mach-sunxi/dram_sunxi_dw.c | 89 +++++++++++++++++-------
+ 1 file changed, 65 insertions(+), 24 deletions(-)
+
+--- a/arch/arm/mach-sunxi/dram_sunxi_dw.c	2026-09-08 21:35:33
++++ b/arch/arm/mach-sunxi/dram_sunxi_dw.c	2026-09-08 21:38:34
+@@ -653,46 +653,96 @@
+ }
+ 
+ /*
+- * Test if memory at offset offset matches memory at a certain base
++ * Aliasing test used by the size detection below. A single write pair
++ * (mctl_mem_matches_base) turned out not to be reliable: as the very first
++ * accesses after the controller has been (re)configured it occasionally
++ * fails to observe the alias, and the loop then concludes one row bit too
++ * many, i.e. double the real size. Writing 16 address-derived words at the
++ * base and requiring all of them to read back at base + offset makes that
++ * disappear. Same approach as the H616/H6 code in dram_dw_helpers.c.
+  */
+-static bool mctl_mem_matches_base(u32 offset, ulong base)
++static void mctl_write_pattern(ulong base)
+ {
+-	/* Try to write different values to RAM at two addresses */
+-	writel(0, base);
+-	writel(0xaa55aa55, base + offset);
+-	dsb();
+-	/* Check if the same value is actually observed when reading back */
+-	return readl(base) ==
+-	       readl(base + offset);
++	unsigned int i;
++	u32 *ptr, val;
++
++	ptr = (u32 *)base;
++	for (i = 0; i < 16; ptr++, i++) {
++		if (i & 1)
++			val = ~(ulong)ptr;
++		else
++			val = (ulong)ptr;
++		writel(val, ptr);
++	}
+ }
+ 
+-static void mctl_auto_detect_dram_size_rank(uint16_t socid, struct dram_para *para, ulong base, struct rank_para *rank)
++static bool mctl_check_pattern(ulong base, ulong offset)
+ {
+-	/* detect row address bits */
+-	rank->page_size = 512;
+-	rank->row_bits = 16;
+-	rank->bank_bits = 2;
+-	mctl_set_cr(socid, para);
++	unsigned int i;
++	u32 *ptr, val;
+ 
+-	for (rank->row_bits = 11; rank->row_bits < 16; rank->row_bits++)
+-		if (mctl_mem_matches_base((1 << (rank->row_bits + rank->bank_bits)) * rank->page_size, base))
+-			break;
++	ptr = (u32 *)base;
++	for (i = 0; i < 16; ptr++, i++) {
++		if (i & 1)
++			val = ~(ulong)ptr;
++		else
++			val = (ulong)ptr;
++		if (val != readl(ptr + offset / 4))
++			return false;
++	}
+ 
+-	/* detect bank address bits */
+-	rank->bank_bits = 3;
++	return true;
++}
++
++/*
++ * (Re)configure the controller for a detection pass, let it settle, save the
++ * words the pattern will overwrite, and write the pattern.
++ */
++static void mctl_detect_prepare(uint16_t socid, struct dram_para *para,
++				ulong base, u32 *buffer)
++{
+ 	mctl_set_cr(socid, para);
++	udelay(50);
++	memcpy(buffer, (u32 *)base, 16 * sizeof(u32));
++	mctl_write_pattern(base);
++}
+ 
+-	for (rank->bank_bits = 2; rank->bank_bits < 3; rank->bank_bits++)
+-		if (mctl_mem_matches_base((1 << rank->bank_bits) * rank->page_size, base))
++static void mctl_auto_detect_dram_size_rank(uint16_t socid, struct dram_para *para, ulong base, struct rank_para *rank)
++{
++	u32 buffer[16];
++
++	/* detect row address bits */
++	rank->page_size = 512;
++	rank->row_bits = 16;
++	rank->bank_bits = 2;
++	mctl_detect_prepare(socid, para, base, buffer);
++
++	for (rank->row_bits = 11; rank->row_bits < 16; rank->row_bits++)
++		if (mctl_check_pattern(base, (1 << (rank->row_bits + rank->bank_bits)) * rank->page_size))
++			break;
++
++	/* restore data, the address map changes with the next mctl_set_cr() */
++	memcpy((u32 *)base, buffer, sizeof(buffer));
++
++	/* detect bank address bits */
++	rank->bank_bits = 3;
++	mctl_detect_prepare(socid, para, base, buffer);
++
++	for (rank->bank_bits = 2; rank->bank_bits < 3; rank->bank_bits++)
++		if (mctl_check_pattern(base, (1 << rank->bank_bits) * rank->page_size))
+ 			break;
++
++	memcpy((u32 *)base, buffer, sizeof(buffer));
+ 
+ 	/* detect page size */
+ 	rank->page_size = 8192;
+-	mctl_set_cr(socid, para);
++	mctl_detect_prepare(socid, para, base, buffer);
+ 
+ 	for (rank->page_size = 512; rank->page_size < 8192; rank->page_size *= 2)
+-		if (mctl_mem_matches_base(rank->page_size, base))
++		if (mctl_check_pattern(base, rank->page_size))
+ 			break;
++
++	memcpy((u32 *)base, buffer, sizeof(buffer));
+ }
+ 
+ static unsigned long mctl_calc_rank_size(struct rank_para *rank)
