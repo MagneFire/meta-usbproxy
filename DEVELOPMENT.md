@@ -419,6 +419,32 @@ the DRAM-droop issue in §8).
   `LIBUSB_ERROR_NO_DEVICE` (disconnect) and inittab respawns it. An earlier
   background-supervisor version orphaned instances and wedged the UDC with
   "couldn't find an available UDC or it's busy".
+- **"Needs a replug after `adb reboot bootloader`" — FIXED (2026-09-08,
+  usb-proxy `f34e120`).** The `_exit` above only ever ran from an endpoint
+  thread. If the device dropped off the Pi's host port while only ep0 traffic
+  was in flight (Mac still enumerating, or right around SET_CONFIGURATION,
+  before any bulk thread existed) the proxy stalled ep0 forever on a dead
+  handle with the gadget still attached: the Mac saw a device answering
+  nothing, inittab never respawned, and the fastboot device that appeared next
+  was never proxied — only a power cycle helped. The hotplug callback was no
+  net either (`kill(0, SIGINT)` only sets flags; the ep0 ioctl is not
+  interrupted, and `main()` then joins the endless hotplug thread). The watch
+  makes that window easy to hit: a cradle attach enumerates three times
+  (devices living 2.2 s, 0.33 s, then the real one) and every reboot
+  double-enumerates. Fix, three layers in usb-proxy: NO_DEVICE from the ep0
+  path exits; the hotplug callback exits directly; and the hotplug/event
+  thread checks the device's devtmpfs node `/dev/bus/usb/BBB/DDD` once a
+  second (removed by the kernel the instant the device leaves, no bus traffic)
+  — logs `Device node ... gone, exiting usb-proxy`, and in practice fires on
+  every transition. In `usb-proxy-run`: a newly appeared device (devnum differs
+  from `/run/usb-proxy.devnum`) must survive 1 s before the gadget attaches,
+  and the gadget stays detached ≥1 s between instances (`/run/usb-proxy.detached`
+  stamp), so the Mac always sees one clean disconnect/connect per identity
+  (the ms-scale re-attach was the recorded macOS stale-object trigger,
+  `MUSB-BULK-OUT.md` §7b). Boot with a device already attached is unchanged.
+  If a hang still happens, run `uv run scripts/mac-usb-unwedge.py` on the Mac
+  *before* replugging: it clears the macOS wedge without power-cycling the Pi,
+  so `/var/volatile/log/usb-proxy.log` survives for a post-mortem.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes

@@ -18,9 +18,13 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # the host as the device drops off the bus, the condvar/fast-path latency
 # work and the adb_ack_accel throughput feature, plus the idle-power work:
 # the endpoint write loop now sleeps instead of polling at 1kHz, and
-# --power_hook/--power_idle_ms drive power-tune's active/idle modes).
+# --power_hook/--power_idle_ms drive power-tune's active/idle modes; and
+# always-exit-on-device-loss: ep0-path NO_DEVICE, a direct-exit hotplug
+# callback and a 1 Hz devtmpfs-node liveness check, so a device that
+# vanishes mid-enumeration can no longer leave a stuck proxy needing a
+# replug -- see DEVELOPMENT.md 8).
 # Bump to advance.
-SRCREV = "24f759e00e1874037962e2f12d16dfdfb0fc91fa"
+SRCREV = "f34e12092ed4002ca4537f7113f9a5295bb64fb4"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"

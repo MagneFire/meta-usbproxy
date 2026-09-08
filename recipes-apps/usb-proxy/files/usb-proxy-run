@@ -19,7 +19,20 @@ LOG_DIR=/var/volatile/log
 LOG="$LOG_DIR/usb-proxy.log"
 mkdir -p "$LOG_DIR"
 
+# State across respawns (tmpfs, gone on reboot):
+#   DEVNUM_STAMP  devnum of the device the previous usb-proxy instance proxied.
+#                 Absent = first run after boot.
+#   DETACH_STAMP  touched on the first launcher run after a proxy exit, i.e.
+#                 at (within ms of) the moment the gadget dropped off the Mac.
+DEVNUM_STAMP=/run/usb-proxy.devnum
+DETACH_STAMP=/run/usb-proxy.detached
+MIN_OFF_S=1
+
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
+
+# inittab respawns us immediately after usb-proxy exits, so "launcher start
+# with no detach stamp" marks the detach. Kept until the next exec.
+[ -e "$DETACH_STAMP" ] || : > "$DETACH_STAMP"
 
 # Need a UDC (gadget controller) to proxy onto.
 udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
@@ -34,7 +47,8 @@ fi
 have_dev=
 for d in /sys/bus/usb/devices/*/idVendor; do
     [ -e "$d" ] || continue
-    [ "$(cat "$(dirname "$d")/bDeviceClass" 2>/dev/null)" = "09" ] && continue
+    dev_dir=$(dirname "$d")
+    [ "$(cat "$dev_dir/bDeviceClass" 2>/dev/null)" = "09" ] && continue
     have_dev=1
     break
 done
@@ -60,8 +74,37 @@ if [ -z "$have_dev" ]; then
     exit 0
 fi
 
+# Settle debounce. The watch re-enumerates several times on a cradle attach
+# (measured: a device that lived 2.2 s, then one that lived 0.33 s, then the
+# real one) and once more around each reboot. Proxying a transient one puts
+# the Mac through a pointless enumerate/vanish cycle -- the recorded trigger
+# for macOS keeping a stale device object -- so require a newly appeared
+# device to survive a second before attaching the gadget. Only on a devnum
+# change: a device already there at boot (no stamp) attaches immediately.
+devnum=$(cat "$dev_dir/devnum" 2>/dev/null)
+last_devnum=$(cat "$DEVNUM_STAMP" 2>/dev/null)
+if [ -n "$last_devnum" ] && [ "$devnum" != "$last_devnum" ]; then
+    sleep 1
+    if [ "$(cat "$dev_dir/devnum" 2>/dev/null)" != "$devnum" ]; then
+        say "device $dev_dir (devnum $devnum) vanished during settle; retrying"
+        exit 0
+    fi
+fi
+
+# Minimum gadget-off time. A respawn on the same device (crash, kill -9)
+# re-attaches within milliseconds, which macOS has been seen to miss entirely
+# (MUSB-BULK-OUT.md 7b). Hold D+ low for at least MIN_OFF_S since the detach.
+if [ -n "$last_devnum" ]; then
+    now=$(date +%s)
+    detached=$(stat -c %Y "$DETACH_STAMP" 2>/dev/null || echo "$now")
+    off=$((now - detached))
+    [ "$off" -lt "$MIN_OFF_S" ] && sleep $((MIN_OFF_S - off))
+fi
+
 cd "$CONF_DIR" || exit 1
-say "exec usb-proxy on UDC $udc"
+echo "$devnum" > "$DEVNUM_STAMP"
+rm -f "$DETACH_STAMP"
+say "exec usb-proxy on UDC $udc (device $dev_dir devnum $devnum)"
 
 # exec: replace the shell so usb-proxy is the respawned process. On device
 # disconnect it exits and inittab respawns us.
