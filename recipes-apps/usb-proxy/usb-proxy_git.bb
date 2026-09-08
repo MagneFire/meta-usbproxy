@@ -22,9 +22,11 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # always-exit-on-device-loss: ep0-path NO_DEVICE, a direct-exit hotplug
 # callback and a 1 Hz devtmpfs-node liveness check, so a device that
 # vanishes mid-enumeration can no longer leave a stuck proxy needing a
-# replug -- see DEVELOPMENT.md 8).
+# replug; and the in-process device wait: the proxy polls for a device
+# itself (100 ms, sysfs only) with a --settle_ms debounce, and stamps its
+# milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8).
 # Bump to advance.
-SRCREV = "f34e12092ed4002ca4537f7113f9a5295bb64fb4"
+SRCREV = "60b3411244881a054532ecc07608269383061e1a"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"

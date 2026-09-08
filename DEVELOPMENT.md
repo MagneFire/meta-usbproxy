@@ -436,15 +436,59 @@ the DRAM-droop issue in §8).
   thread checks the device's devtmpfs node `/dev/bus/usb/BBB/DDD` once a
   second (removed by the kernel the instant the device leaves, no bus traffic)
   — logs `Device node ... gone, exiting usb-proxy`, and in practice fires on
-  every transition. In `usb-proxy-run`: a newly appeared device (devnum differs
-  from `/run/usb-proxy.devnum`) must survive 1 s before the gadget attaches,
-  and the gadget stays detached ≥1 s between instances (`/run/usb-proxy.detached`
-  stamp), so the Mac always sees one clean disconnect/connect per identity
-  (the ms-scale re-attach was the recorded macOS stale-object trigger,
-  `MUSB-BULK-OUT.md` §7b). Boot with a device already attached is unchanged.
+  every transition. Debounce: a newly appeared device must survive 1 s before
+  the gadget attaches (usb-proxy `--settle_ms`, checked against the devtmpfs
+  node; the launcher passes it for every instance after the first since boot,
+  `/run/usb-proxy.started`), and the gadget stays detached ≥1 s between
+  instances (`/run/usb-proxy.detached` stamp, launcher), so the Mac always sees
+  one clean disconnect/connect per identity (the ms-scale re-attach was the
+  recorded macOS stale-object trigger, `MUSB-BULK-OUT.md` §7b). Boot with a
+  device already attached attaches immediately.
   If a hang still happens, run `uv run scripts/mac-usb-unwedge.py` on the Mac
   *before* replugging: it clears the macOS wedge without power-cycling the Pi,
   so `/var/volatile/log/usb-proxy.log` survives for a post-mortem.
+- **usb-proxy waits for the device itself; the launcher no longer polls
+  (2026-09-08).** Why adb/fastboot took seconds longer to appear through the
+  appliance than direct: not the datapath. Measured with appliance `dmesg`
+  against the Mac's adb server log (`$TMPDIR/adb.501.log`, "reported max packet
+  size" = transport up), same watch, same Mac: with the proxy already waiting
+  (cold boot) adb was up **1.2 s** after the kernel's `new high-speed USB
+  device` line — that 1.2 s is everything the proxy, macOS enumeration and
+  adb's own 1 s device poll cost together. After a reconnect it was **3.8 s**,
+  because the old launcher found no device, did `sleep 2; exit 0`, and inittab
+  respawned it — ~2.9 s per cycle (7 cycles in 20.5 s) — so a returning device
+  sat enumerated for 0–3 s before the proxy was even launched, plus the 1 s
+  settle. Two transitions per adb→bootloader→adb round trip made that 5–6 s.
+  Now `connect_device()` polls the libusb device list every 100 ms (sysfs only:
+  ten full scans took 46 ms at 648 MHz), does the settle in-process, and
+  `main()` retries a failed attempt after 200 ms instead of 1 s; `libusb_init`
+  runs once (each retry used to leak a context). The launcher is a plain
+  `exec` after the UDC check. Power with nothing attached is handled by
+  usb-proxy's own policy (it starts wound up, winds down after `power_idle_ms`,
+  and winds up again the moment a device is opened), which replaces the old
+  launcher's `power-tune idle` branch. Measured after the change: adb up
+  1.85 s after the kernel's enumeration line on a reconnect (was 3.8 s), the
+  Mac listing the gadget within 50 ms of the proxy attaching. usb-proxy now
+  stamps its milestone log lines with `[uptime]` (CLOCK_MONOTONIC, the same
+  clock as `dmesg`) so this can be re-measured from the log alone; with
+  `--verbose` it also stamps each step of `connect_device()`.
+- **The minnow fastboot bootloader cost a further 5 s: a kernel string read
+  the bootloader never answers (2026-09-08).** With the launcher fixed, the
+  bootloader still took 5.0 s from "device found" to "opened" (Android: 1.0 s,
+  the settle). All of it was inside `libusb_open()`: usbfs open takes the
+  device lock, and the kernel was holding it in `usb_set_configuration()`
+  reading the configuration string (the bootloader's config descriptor has
+  `iConfiguration=4`; sysfs `configuration` shows `N/A`, i.e. the read failed
+  after the 5 s `USB_CTRL_GET_TIMEOUT`). The Mac never asks for that string,
+  which is why a direct connection never paid it. Fix: `USB_QUIRK_CONFIG_
+  INTF_STRINGS` for `22b8:42d1`, written by the launcher to
+  `/sys/module/usbcore/parameters/quirks` once at boot (same syntax as the
+  `usbcore.quirks=` kernel parameter; a `quirks.c` entry would do the same
+  at the cost of a kernel rebuild). Verified: bootloader found→opened 1.0 s,
+  `adb reboot bootloader` → `fastboot devices` 9.3 s instead of 13.3 s
+  (the rest is the watch's own reboot). Diagnostic pattern worth keeping:
+  sysfs strings/`descriptors` of the device while in the slow state show
+  which string index the device cannot serve.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes

@@ -2,13 +2,23 @@
 # usb-proxy appliance launcher — respawned by /etc/inittab.
 #
 # This stays deliberately simple: it execs usb-proxy so usb-proxy IS the
-# inittab-tracked process (exactly one instance, no orphans). usb-proxy already
-# handles device disconnect itself — its libusb hotplug callback fires on
-# DEVICE_LEFT and SIGINTs the process — so on unplug it exits and inittab
-# respawns us, which re-proxies whatever is attached on replug. This mirrors
-# Armbian's systemd "Restart=always" model; no supervisor/restart logic here
-# (an earlier background-supervisor version orphaned instances and wedged the
-# UDC with "couldn't find an available UDC or it's busy").
+# inittab-tracked process (exactly one instance, no orphans). usb-proxy waits
+# for a device itself (100 ms sysfs poll, no bus traffic) and exits when the
+# proxied device leaves the bus, so inittab respawns us and the next instance
+# picks up whatever comes back. This mirrors Armbian's systemd "Restart=always"
+# model; no supervisor/restart logic here (an earlier background-supervisor
+# version orphaned instances and wedged the UDC with "couldn't find an
+# available UDC or it's busy").
+#
+# Why usb-proxy waits and this script does not: the old launcher scanned sysfs
+# and, with nothing attached, did `sleep 2; exit 0` for inittab to respawn.
+# Measured on hardware that cycle cost ~3 s, so a device that came back sat
+# enumerated for 0-3 s before the proxy even started; the Mac saw it 3.8 s
+# after the kernel did, versus 1.2 s when the proxy was already waiting (the
+# boot case). It also ran the whole wait wound down and paid a shell + sysfs
+# scan per cycle. usb-proxy's power policy covers the idle case now: it starts
+# wound up, winds down after power_idle_ms of no traffic, and winds up again
+# the moment a device is opened.
 #
 # Status lines go to stdout (serial console under BusyBox init) and the
 # logfile; usb-proxy's own output goes to the logfile only.
@@ -20,13 +30,14 @@ LOG="$LOG_DIR/usb-proxy.log"
 mkdir -p "$LOG_DIR"
 
 # State across respawns (tmpfs, gone on reboot):
-#   DEVNUM_STAMP  devnum of the device the previous usb-proxy instance proxied.
-#                 Absent = first run after boot.
-#   DETACH_STAMP  touched on the first launcher run after a proxy exit, i.e.
-#                 at (within ms of) the moment the gadget dropped off the Mac.
-DEVNUM_STAMP=/run/usb-proxy.devnum
+#   STARTED_STAMP  exists once a usb-proxy instance has run since boot.
+#                  Absent = first run after boot.
+#   DETACH_STAMP   touched on the first launcher run after a proxy exit, i.e.
+#                  at (within ms of) the moment the gadget dropped off the Mac.
+STARTED_STAMP=/run/usb-proxy.started
 DETACH_STAMP=/run/usb-proxy.detached
 MIN_OFF_S=1
+SETTLE_MS=1000
 
 say() { echo "[usb-proxy-run] $*"; echo "[usb-proxy-run] $*" >> "$LOG"; }
 
@@ -42,59 +53,45 @@ if [ -z "$udc" ]; then
     exit 0
 fi
 
-# Need a (non-hub) USB device to proxy; otherwise wait and let init respawn us
-# (avoids a tight respawn loop when nothing is attached).
-have_dev=
-for d in /sys/bus/usb/devices/*/idVendor; do
-    [ -e "$d" ] || continue
-    dev_dir=$(dirname "$d")
-    [ "$(cat "$dev_dir/bDeviceClass" 2>/dev/null)" = "09" ] && continue
-    have_dev=1
-    break
-done
-if [ -z "$have_dev" ]; then
-    say "no USB device attached to proxy yet; waiting"
-    # Nothing to proxy means nothing to be fast for. usb-proxy drives the
-    # active/idle hook itself, but it never gets to run in this branch, so
-    # `power-tune boot` would otherwise leave the board wound up at two cores
-    # indefinitely whenever no device is attached — the exact state an idle
-    # appliance sits in. Wind down here instead; usb-proxy winds back up the
-    # moment it sees traffic.
-    #
-    # Only on the transition. inittab respawns this script every couple of
-    # seconds while nothing is attached, and forking power-tune every time is
-    # not free: measured on hardware, this branch running flat out costs 2.7%
-    # of a core versus 0.25% quiescent — five times busier doing nothing than
-    # the proxy is when actually working.
-    if [ -x /usr/bin/power-tune ] &&
-       [ "$(cat /sys/devices/system/cpu/cpu1/online 2>/dev/null)" = "1" ]; then
-        /usr/bin/power-tune idle
-    fi
-    sleep 2
-    exit 0
-fi
+# Kernel USB quirks for devices the appliance's own host stack is slow to
+# enumerate. Applied once, before the first proxy instance.
+#
+#   22b8:42d1:d  Motorola/Moto 360 (minnow) fastboot bootloader. Its config
+#                descriptor names a configuration string (iConfiguration=4)
+#                that the bootloader never answers. usb_set_configuration()
+#                reads that string while holding the device lock, so the
+#                kernel sat in a 5 s control timeout and usb-proxy's open()
+#                blocked behind it: measured "device found" -> "opened" of
+#                5.0 s for the bootloader vs 1.0 s (the settle) for Android.
+#                Quirk letter d = USB_QUIRK_CONFIG_INTF_STRINGS: skip the
+#                configuration/interface string reads. The Mac never asks
+#                for that string, so direct connections never paid this.
+#                Same syntax as the usbcore.quirks= kernel parameter.
+USB_QUIRKS="22b8:42d1:d"
 
-# Settle debounce. The watch re-enumerates several times on a cradle attach
-# (measured: a device that lived 2.2 s, then one that lived 0.33 s, then the
-# real one) and once more around each reboot. Proxying a transient one puts
-# the Mac through a pointless enumerate/vanish cycle -- the recorded trigger
-# for macOS keeping a stale device object -- so require a newly appeared
-# device to survive a second before attaching the gadget. Only on a devnum
-# change: a device already there at boot (no stamp) attaches immediately.
-devnum=$(cat "$dev_dir/devnum" 2>/dev/null)
-last_devnum=$(cat "$DEVNUM_STAMP" 2>/dev/null)
-if [ -n "$last_devnum" ] && [ "$devnum" != "$last_devnum" ]; then
-    sleep 1
-    if [ "$(cat "$dev_dir/devnum" 2>/dev/null)" != "$devnum" ]; then
-        say "device $dev_dir (devnum $devnum) vanished during settle; retrying"
-        exit 0
+settle=0
+if [ ! -e "$STARTED_STAMP" ]; then
+    if [ -n "$USB_QUIRKS" ] && [ -w /sys/module/usbcore/parameters/quirks ]; then
+        echo "$USB_QUIRKS" > /sys/module/usbcore/parameters/quirks
+        say "usbcore quirks: $(cat /sys/module/usbcore/parameters/quirks)"
     fi
-fi
+else
+    # Settle debounce, done inside usb-proxy. The watch re-enumerates several
+    # times on a cradle attach (measured: a device that lived 2.2 s, then one
+    # that lived 0.33 s, then the real one) and once more around each reboot.
+    # Proxying a transient one puts the Mac through a pointless
+    # enumerate/vanish cycle -- the recorded trigger for macOS keeping a stale
+    # device object -- so a newly appeared device must survive a second before
+    # the gadget attaches. Not on the first instance after boot: a device
+    # already there at boot attaches immediately.
+    settle=$SETTLE_MS
 
-# Minimum gadget-off time. A respawn on the same device (crash, kill -9)
-# re-attaches within milliseconds, which macOS has been seen to miss entirely
-# (MUSB-BULK-OUT.md 7b). Hold D+ low for at least MIN_OFF_S since the detach.
-if [ -n "$last_devnum" ]; then
+    # Minimum gadget-off time. A respawn on the same device (crash, kill -9)
+    # re-attaches within milliseconds, which macOS has been seen to miss
+    # entirely (MUSB-BULK-OUT.md 7b). Hold D+ low for at least MIN_OFF_S since
+    # the detach. Done here, before exec: usb-proxy cannot attach before it
+    # has a device anyway, and nothing arrives inside this window that the
+    # settle would not have held back.
     now=$(date +%s)
     detached=$(stat -c %Y "$DETACH_STAMP" 2>/dev/null || echo "$now")
     off=$((now - detached))
@@ -102,9 +99,9 @@ if [ -n "$last_devnum" ]; then
 fi
 
 cd "$CONF_DIR" || exit 1
-echo "$devnum" > "$DEVNUM_STAMP"
+: > "$STARTED_STAMP"
 rm -f "$DETACH_STAMP"
-say "exec usb-proxy on UDC $udc (device $dev_dir devnum $devnum)"
+say "exec usb-proxy on UDC $udc (settle ${settle} ms)"
 
 # exec: replace the shell so usb-proxy is the respawned process. On device
 # disconnect it exits and inittab respawns us.
@@ -112,4 +109,5 @@ exec /usr/bin/usb-proxy \
     --device "$udc" \
     --driver musb-hdrc \
     --enable_customized_config \
-    --auto_remap_endpoints >> "$LOG" 2>&1
+    --auto_remap_endpoints \
+    --settle_ms "$settle" >> "$LOG" 2>&1
