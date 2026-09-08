@@ -36,6 +36,13 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    (pairs with the 0004 reserved-memory node).
 #  * 0006-soc-...bus-clock-policy: clock-framework-backed active/idle control
 #    for AHB1/APB1 and MBUS. AHB2 (USB host) and APB2 (UART) stay unchanged.
+#  * 0007-usb-core-skip-config-and-interface-strings: set
+#    USB_QUIRK_CONFIG_INTF_STRINGS on every device so usbcore never fetches
+#    iConfiguration/iInterface strings (sysfs-only data nothing here reads).
+#    The minnow fastboot bootloader never answers its iConfiguration read and
+#    the kernel sat in the 5 s control timeout with the device lock held, so
+#    usb-proxy's open() blocked 5 s per bootloader appearance. Placed before
+#    the dynamic quirks so usbcore.quirks=VID:PID:d can re-enable per device.
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \
@@ -43,6 +50,7 @@ SRC_URI:append = " \
     file://0004-dts-orangepi-zero-cap-cpu-816-add-ramoops.patch \
     file://0005-dts-orangepi-zero-disable-mmc0.patch \
     file://0006-soc-sunxi-add-usbproxy-bus-clock-policy.patch \
+    file://0007-usb-core-skip-config-and-interface-strings.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

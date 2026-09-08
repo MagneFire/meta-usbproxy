@@ -1,0 +1,49 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] usb: core: never fetch configuration/interface strings
+
+Set USB_QUIRK_CONFIG_INTF_STRINGS on every device so usb_set_configuration()
+and usb_create_sysfs_intf_files() skip the iConfiguration/iInterface string
+reads. Those strings only populate the sysfs `configuration` and `interface`
+attributes, which nothing on this appliance reads: usb-proxy mirrors the raw
+descriptors and forwards the host's own string requests to the device live.
+
+Why it matters here: the Moto 360 (minnow) fastboot bootloader, 22b8:42d1,
+names a configuration string (iConfiguration=4) that it never answers.
+usb_set_configuration() fetches it while holding the device lock, so the
+kernel sat in the 5 s USB_CTRL_GET_TIMEOUT (usb_string_sub can retry with a
+2-byte read, so up to 10 s per index) and usb-proxy's usbfs open() blocked
+behind the lock. Measured on the appliance 2026-09-08: "device found" to
+"opened" 5.0 s for the bootloader versus 1.0 s (the settle debounce) for
+Android; fastboot became visible on the Mac 5.5 s after the kernel's
+enumeration line. With the quirk, 1.0 s and ~1.2 s. A Mac never asks for
+that string, which is why a direct connection never paid it.
+
+The OR sits before the dynamic quirks, whose XOR semantics let
+usbcore.quirks=VID:PID:d (or a runtime write to
+/sys/module/usbcore/parameters/quirks) switch the skip back off for one
+device, should any device ever need those strings cached.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+diff --git a/drivers/usb/core/quirks.c b/drivers/usb/core/quirks.c
+index 6926bd639..3555ba9e0 100644
+--- a/drivers/usb/core/quirks.c
++++ b/drivers/usb/core/quirks.c
+@@ -717,6 +717,17 @@ void usb_detect_quirks(struct usb_device *udev)
+ 		udev->quirks |= usb_detect_static_quirks(udev,
+ 				usb_amd_resume_quirk_list);
+ 
++	/*
++	 * Appliance: the configuration and interface strings only populate
++	 * sysfs, which nothing here reads, and fetching them costs up to
++	 * 2 x USB_CTRL_GET_TIMEOUT per index on a device that never answers
++	 * (the minnow fastboot bootloader: 5 s with the device lock held, so
++	 * usbfs open() blocked behind it). Skip them for every device. This
++	 * sits before the dynamic quirks, whose XOR lets usbcore.quirks=VID:PID:d
++	 * switch it back off for one device.
++	 */
++	udev->quirks |= USB_QUIRK_CONFIG_INTF_STRINGS;
++
+ 	udev->quirks ^= usb_detect_dynamic_quirks(udev);
+ 
+ 	if (udev->quirks)

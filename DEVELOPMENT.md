@@ -43,6 +43,7 @@ recipes-kernel/linux/files/0001-musb-…rx-requeue.patch  in-tree musb bulk-OUT 
 recipes-kernel/linux/files/0002-…force-peripheral.patch megous OTG peripheral-mode fix
 recipes-kernel/linux/files/0003-dts-…appliance-trim.patch  DT: disable ehci0/ohci0/mmc1/emac
 recipes-kernel/linux/files/0006-soc-…bus-clock-policy.patch  dynamic AHB1/APB1/MBUS policy
+recipes-kernel/linux/files/0007-usb-core-…strings.patch  never fetch iConfiguration/iInterface strings
 recipes-kernel/linux/files/usbproxy.cfg       raw-gadget/musb/gadget/initramfs =y + quiet cmdline
 recipes-kernel/linux/files/usbproxy-trim.cfg  subsystem disables (keep NET + MODULES)
 recipes-bsp/u-boot/u-boot_%.bbappend          merges the u-boot fragment
@@ -480,11 +481,16 @@ the DRAM-droop issue in §8).
   reading the configuration string (the bootloader's config descriptor has
   `iConfiguration=4`; sysfs `configuration` shows `N/A`, i.e. the read failed
   after the 5 s `USB_CTRL_GET_TIMEOUT`). The Mac never asks for that string,
-  which is why a direct connection never paid it. Fix: `USB_QUIRK_CONFIG_
-  INTF_STRINGS` for `22b8:42d1`, written by the launcher to
-  `/sys/module/usbcore/parameters/quirks` once at boot (same syntax as the
-  `usbcore.quirks=` kernel parameter; a `quirks.c` entry would do the same
-  at the cost of a kernel rebuild). Verified: bootloader found→opened 1.0 s,
+  which is why a direct connection never paid it. Fix: kernel patch `0007`
+  sets `USB_QUIRK_CONFIG_INTF_STRINGS` on every device in
+  `usb_detect_quirks()`, so usbcore never fetches iConfiguration/iInterface
+  strings (they only fill sysfs `configuration`/`interface`, which nothing
+  here reads; the Mac's own string requests are forwarded live regardless).
+  It sits before the dynamic-quirk XOR, so `usbcore.quirks=VID:PID:d`
+  (runtime: `/sys/module/usbcore/parameters/quirks`) switches it back off
+  for one device. The first fix was that runtime parameter written by the
+  launcher for `22b8:42d1` only, because the parameter has no wildcard.
+  Verified: bootloader found→opened 1.0 s,
   `adb reboot bootloader` → `fastboot devices` 9.3 s instead of 13.3 s
   (the rest is the watch's own reboot). Diagnostic pattern worth keeping:
   sysfs strings/`descriptors` of the device while in the slow state show

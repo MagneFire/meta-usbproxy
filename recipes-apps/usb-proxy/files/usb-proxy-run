@@ -53,29 +53,15 @@ if [ -z "$udc" ]; then
     exit 0
 fi
 
-# Kernel USB quirks for devices the appliance's own host stack is slow to
-# enumerate. Applied once, before the first proxy instance.
-#
-#   22b8:42d1:d  Motorola/Moto 360 (minnow) fastboot bootloader. Its config
-#                descriptor names a configuration string (iConfiguration=4)
-#                that the bootloader never answers. usb_set_configuration()
-#                reads that string while holding the device lock, so the
-#                kernel sat in a 5 s control timeout and usb-proxy's open()
-#                blocked behind it: measured "device found" -> "opened" of
-#                5.0 s for the bootloader vs 1.0 s (the settle) for Android.
-#                Quirk letter d = USB_QUIRK_CONFIG_INTF_STRINGS: skip the
-#                configuration/interface string reads. The Mac never asks
-#                for that string, so direct connections never paid this.
-#                Same syntax as the usbcore.quirks= kernel parameter.
-USB_QUIRKS="22b8:42d1:d"
+# The kernel-side enumeration cost of a device that never answers its
+# configuration/interface string reads (the minnow fastboot bootloader: 5 s
+# per appearance) is handled in the kernel now: meta-usbproxy patch 0007 sets
+# USB_QUIRK_CONFIG_INTF_STRINGS for every device. usbcore.quirks=VID:PID:d at
+# runtime (/sys/module/usbcore/parameters/quirks) switches it back off for one
+# device if some device ever needs those strings cached.
 
 settle=0
-if [ ! -e "$STARTED_STAMP" ]; then
-    if [ -n "$USB_QUIRKS" ] && [ -w /sys/module/usbcore/parameters/quirks ]; then
-        echo "$USB_QUIRKS" > /sys/module/usbcore/parameters/quirks
-        say "usbcore quirks: $(cat /sys/module/usbcore/parameters/quirks)"
-    fi
-else
+if [ -e "$STARTED_STAMP" ]; then
     # Settle debounce, done inside usb-proxy. The watch re-enumerates several
     # times on a cradle attach (measured: a device that lived 2.2 s, then one
     # that lived 0.33 s, then the real one) and once more around each reboot.
