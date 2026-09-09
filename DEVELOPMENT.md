@@ -53,6 +53,12 @@ recipes-core/busybox/busybox_%.bbappend       enables the devmem applet (used by
 recipes-support/libusb/libusb1_%.bbappend     builds libusb without udev → netlink hotplug
 scripts/host-deps.sh                          install Yocto build deps (Debian/Ubuntu)
 scripts/setup-build.sh                         clone layers @scarthgap + write build conf
+scripts/appliance.py                          deploy + verify: swap / boot-ram / flash / check / soak (§5b, §6)
+scripts/applib.py                             serial plumbing shared by the scripts (node autodetect, getty login, U-Boot, Y-modem)
+scripts/uboot-flash.py, uboot-console.py      U-Boot over serial: write SPL / FAT files, RAM-boot a kernel, run a command
+scripts/pi-serial.py, serial-upload.py        Linux over serial: run a command, upload a small file
+scripts/boot-soak.py, power-probe.py          warm-reboot soak; wakeups/busy% probe
+.claude/skills/appliance/SKILL.md             the deploy runbook (which tier, what check must print, gotchas)
 ```
 
 ---
@@ -189,6 +195,23 @@ into the appliance:
 
 ### 5b. Fast dev loop (iterating against the appliance, no fork push)
 
+**The short form.** Point devtool at the local tree once, then every
+iteration is one command that builds, uploads the stripped binary over serial
+into the RAM rootfs, respawns the proxy and verifies (md5, respawn, `adb
+devices`):
+
+```sh
+# once, in the build env:
+devtool modify --no-extract usb-proxy /Users/darrel/Downloads/usb-proxy
+# every iteration, from the Mac:
+uv run scripts/appliance.py swap --adb
+```
+
+`scripts/appliance.py` is the one entry point for deploying (`swap`,
+`boot-ram`, `flash`, `check`, `soak`); the project skill
+`.claude/skills/appliance/SKILL.md` is the runbook for picking the tier. The
+rest of this section explains what it does and the manual equivalents.
+
 Build local working-tree edits straight into the image without pushing to the
 fork. Two ways — **devtool is the recommended one.**
 
@@ -256,6 +279,51 @@ appliance's musb behaviour. Test musb changes on the Orange Pi.
 
 ## 6. Flashing the SD card (from the Mac)
 
+**Card in the board (the normal way).** Everything the image needs on the card
+is a handful of files U-Boot can write itself over the serial console, so a
+release flash is:
+
+```sh
+uv run scripts/appliance.py flash --adb
+```
+
+It catches the U-Boot prompt, compares the deploy dir's uImage, DTB, boot.scr
+and U-Boot against what is on the card (crc32 via `fatload`/`mmc read`), sends
+only what differs (`--uboot` forces U-Boot, `--force` the FAT files), verifies
+every write by readback, resets, and runs `check`: DRAM banner 256 MiB,
+watchdog armed, no oops, login, `/etc/buildinfo` equal to the deploy dir's
+build stamp, usb-proxy md5 equal to the build's, one real proxy running,
+pstore empty, watch in `adb devices`. Transcripts go to `~/.cache/appliance/`.
+
+**RAM-only test of a whole image, card untouched:**
+
+```sh
+uv run scripts/appliance.py boot-ram               # deploy dir's uImage-initramfs
+```
+
+`loady` puts the bundled uImage in RAM, `bootm` boots it with the card's DTB
+and bootargs, and the same `check` runs. The next reboot is the card's own
+kernel again. Use it for kernel/DT/initramfs/launcher changes before `flash`.
+
+**Speed.** Y-modem at 115200 moves 9.0 KB/s: the 6 MB uImage took 653 s.
+With `CONFIG_SYS_LOADS_BAUD_CHANGE=y` in U-Boot (`usbproxy-uboot.cfg`, on the
+card since 2026-09-09) the same takes 136 s (43 KB/s): `boot-ram`/`flash`
+default to 750000 (`--baud 0` forces 115200; `uboot-flash.py --baud 750000`
+for the single-file form). Use 750000 and nothing else: the H3 UART
+divides 24 MHz/16 by an integer, so `921600` is accepted, printed, and
+actually 750000 on the wire, at which point the Mac side never syncs and the
+board waits for an ENTER at a rate nobody is sending (recover by talking to
+it at 750000 and `reset`). The scripts refuse rates outside the exact set and
+detect a U-Boot without the option, staying at 115200.
+
+**The kernel file is `uImage-initramfs-*.bin`** (~6 MB, rootfs inside). The
+plain `uImage-*.bin` in the same directory is kernel-only; flashed as `/uImage`
+it boots to `Starting kernel ...` and hangs with no init, the watchdog does not
+bounce it, and only a power-cycle followed by `--catch` gets U-Boot back. The
+scripts refuse a kernel file without `initramfs` in its name.
+
+**Card out of the board (fallback: a card that no longer reaches U-Boot).**
+
 ```sh
 # Identify the card first — get the disk number:
 diskutil list                                   # find e.g. /dev/disk11
@@ -271,9 +339,10 @@ diskutil eject /dev/disk11
 I/O error mid-write just needs a retry. Without bmaptool:
 `zcat <image>.wic.gz | sudo dd of=/dev/rdisk11 bs=4m`.
 
-**Kernel/DT-only update over serial.** Because the runtime rootfs is bundled in
-`uImage`, most software changes do not require removing the card. Enter U-Boot,
-then YMODEM-write the bundled kernel and DTB directly to the FAT boot partition:
+**Single files by hand** (what `appliance.py flash` does underneath). Because
+the runtime rootfs is bundled in `uImage`, most software changes do not require
+removing the card. Enter U-Boot, then YMODEM-write the bundled kernel and DTB
+directly to the FAT boot partition:
 
 ```sh
 PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/uboot-flash.py --catch \
@@ -303,7 +372,9 @@ screen /dev/tty.usbserial-10 115200      # Ctrl-A k to quit
 ```
 
 Scripted: use `scripts/pi-serial.py` (in this repo — opens the port at 115200,
-logs in as root with the empty password, runs a command, prints the output). It
+logs in as root with the empty password, runs a command, prints the output).
+With one dongle plugged in the scripts find the node themselves
+(`scripts/applib.py`); `PI_DEV` picks one when there are several. It
 carries an inline uv dependency on `pyserial`, so **run it with uv** — uv builds
 an ephemeral env with pyserial; there is nothing to pip-install (the system
 `python3` does **not** have pyserial):

@@ -89,10 +89,17 @@ Output: `~/yocto/usbproxy/tmp/deploy/images/orange-pi-zero/usbproxy-image-orange
 
 ## Flash & run
 
+First card: write the whole image from the Mac.
+
 ```sh
 # Fastest (uses the bmap):  bmaptool copy <image>.wic.gz /dev/<sdcard>
 # Or:                       zcat <image>.wic.gz | sudo dd of=/dev/<sdcard> bs=4M
 ```
+
+Every later image goes on with the card in the board, over the serial console,
+verified by readback and a post-boot check (`uv run scripts/appliance.py flash`;
+`boot-ram` tests an image from RAM without writing the card at all). See
+DEVELOPMENT.md §6 and `.claude/skills/appliance/SKILL.md`.
 
 Boot the Orange Pi Zero. On the serial console you'll see U-Boot hand off with no
 delay and `usb-proxy` start within a second or two. Plug the target USB device
