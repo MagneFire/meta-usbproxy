@@ -8,6 +8,10 @@ inherit core-image
 # partition and nothing persists across boots (power-loss proof). No
 # read-only-rootfs needed — RAM is volatile by nature.
 IMAGE_INSTALL = "packagegroup-core-boot usb-proxy"
+# memtester (meta-oe): hours-long DRAM test on the running appliance, to rule
+# DRAM in or out for the boot-time corruption (DEVELOPMENT.md section 9).
+# `memtester 64M 20` with the proxy idle; ~130 KB, nothing runs it by itself.
+IMAGE_INSTALL += "memtester"
 IMAGE_FEATURES:remove = "package-management"
 # Passwordless root on the serial console for recovery.
 IMAGE_FEATURES += "empty-root-password allow-empty-password allow-root-login"
