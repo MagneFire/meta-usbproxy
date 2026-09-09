@@ -25,3 +25,11 @@ IMAGE_FSTYPES = "cpio.gz"
 # default ".rootfs" IMAGE_NAME_SUFFIX so the deployed name matches (as Yocto's
 # own *-initramfs images do).
 IMAGE_NAME_SUFFIX = ""
+
+# /etc/buildinfo: which build is this? The RAM rootfs has no other identity
+# (/etc/version is the fixed reproducible-build stamp), and a deploy that
+# "did not take" is otherwise indistinguishable from one that did.
+# scripts/appliance.py check compares the meta-usbproxy revision and the
+# DATETIME stamp (the one in the deploy filenames) against the build tree.
+inherit image-buildinfo
+IMAGE_BUILDINFO_VARS = "DISTRO DISTRO_VERSION MACHINE DATETIME"
