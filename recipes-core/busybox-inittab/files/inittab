@@ -1,0 +1,45 @@
+# usb-proxy appliance /etc/inittab (BusyBox init). Replaces poky's template.
+#
+# BusyBox init runs every `sysinit` entry to completion, in order, and only
+# then forks the `once` and `respawn` entries. Measured 2026-09-09: with the
+# stock template plus power-tune ahead of it, usb-proxy was forked 0.51 s after
+# the kernel handed over to /init (t=0.84 s), while the kernel had finished
+# enumerating the attached watch at about t=0.65 s. So this file keeps only
+# what usb-proxy actually needs in front of it (proc, sysfs, devtmpfs: that is
+# /sys/class/udc, /dev/bus/usb, /dev/raw-gadget) and runs the rest alongside.
+#
+# Dropped from the template, deliberately:
+#   mount -o remount,rw /   the rootfs is the bundled initramfs (ramfs), rw
+#   mount -a / swapon -a    the stock fstab only carries these tmpfs lines
+#   /dev/fd symlinks        nothing on this image uses them
+#   /etc/init.d/rcS         there is no /etc/rcS.d on this image; it ran nothing
+# The busybox-inittab recipe appends the ttyS0 recovery getty after this file.
+
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -t sysfs sysfs /sys
+::sysinit:/bin/mount -t devtmpfs devtmpfs /dev
+::sysinit:/bin/mkdir -p /dev/pts
+::sysinit:/bin/mount -t devpts -o mode=0620,ptmxmode=0666,gid=5 devpts /dev/pts
+::sysinit:/bin/mount -t tmpfs -o mode=0755,nodev,nosuid,strictatime tmpfs /run
+::sysinit:/bin/mount -t tmpfs tmpfs /var/volatile
+null::sysinit:/bin/busybox hostname -F /etc/hostname
+
+# Appliance power tuning (offline spare CPU cores, LEDs, bus clocks). Forked
+# in parallel with the respawns below: every step is idempotent and usb-proxy
+# does not depend on any of it (its own active/idle hook fires seconds later).
+::once:/usr/bin/power-tune
+
+# Crash post-mortem: expose ramoops records (the kernel auto-reboots on any
+# oops/panic; the crash text lands here, surviving the reboot).
+::once:/bin/mount -t pstore pstore /sys/fs/pstore
+
+# Feed the hardware watchdog (armed by U-Boot at power-on; a silent hang
+# anywhere resets the board in <=8s). -F: foreground so init tracks it.
+::respawn:/sbin/watchdog -F -T 8 -t 2 /dev/watchdog
+
+# usb-proxy appliance: the single purpose of this device.
+# Respawn on exit covers device unplug/replug and crashes.
+::respawn:/usr/bin/usb-proxy-run
+
+::shutdown:/bin/umount -a -r
+::restart:/sbin/init

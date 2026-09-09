@@ -68,7 +68,7 @@ READBACK = "0x43000000"
 # The bootargs meta-sunxi's boot.scr sets. root= is meaningless with a bundled
 # initramfs but harmless, and keeping the line identical means a RAM boot
 # tests the same cmdline the card boots with.
-BOOTARGS = "console=${console} console=tty1 root=/dev/mmcblk0p2 rootwait panic=10 ${extra}"
+BOOTARGS = "console=${console} maxcpus=2 panic=10 ${extra}"
 
 
 def usage():

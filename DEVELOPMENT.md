@@ -569,6 +569,35 @@ the DRAM-droop issue in §8).
   (the rest is the watch's own reboot). Diagnostic pattern worth keeping:
   sysfs strings/`descriptors` of the device while in the slow state show
   which string index the device cannot serve.
+- **Plug-in → adb budget, and what was trimmed (2026-09-09).** Measured on
+  the rig from the serial timestamps of a cold boot against the Mac's adb
+  server log, cross-checked with the kernel-clock `[uptime]` stamps in the
+  proxy log and `/proc/<pid>/stat` start ticks. From the SPL banner to adb's
+  "reported max packet size": **3.26 s**, made of: SPL 0.30; U-Boot proper
+  0.57 (0.26 fixed, 0.26 reading the 6 MB uImage at 22 MB/s, 0.05 CRC);
+  zImage self-gunzip 0.35; kernel to `/init` 0.33; `/init` to the usb-proxy
+  fork 0.51 (the whole inittab sysinit chain plus power-tune ran first);
+  usb-proxy to the Mac's SET_CONFIGURATION 0.30; and then **0.90 s inside
+  macOS/adb** — adb's macOS backend (`client/usb_osx.cpp`, `RunLoopThread`)
+  rescans IOKit with a fixed `sleep_for(1s)`, so 0–1 s of jitter is adb's
+  own and cannot be fixed from the appliance. The gap from physical plug-in
+  to the SPL banner (BROM, SD detect, VBUS) is not in this number. Trimmed:
+  (1) `/etc/inittab` is now this layer's own file — usb-proxy forks right
+  after proc/sysfs/devtmpfs are mounted, with power-tune and the pstore
+  mount as `once` entries alongside it (BusyBox init runs every `sysinit`
+  entry to completion before forking any `once`/`respawn`); (2) the zImage
+  is LZ4- instead of gzip-compressed (`CONFIG_KERNEL_LZ4`); (3) our own
+  `boot.scr` (`recipes-bsp/u-boot/files/usbproxy-boot.cmd`): `verify=n`,
+  load `uImage` directly, `maxcpus=2`, no `console=tty1`/`root=`. Measured
+  after (three warm reboots, SPL banner → adb transport): **2.61 / 2.56 /
+  2.88 s** (was 3.26); "Starting kernel" → getty 0.63 s (was 1.19); usb-proxy
+  forks at t=0.41 (was 0.84), `device found` t=0.77, Mac SET_CONFIGURATION
+  t=1.01 (was 1.13). The uImage grew 6.03 → 6.99 MB (LZ4). What is left is
+  bounded by the kernel's own enumeration of the watch (`new high-speed USB
+  device` at t≈0.55, usable ~0.2 s later), U-Boot's SD reads, and adb's
+  poll. Re-measure with a stamped serial capture of `reboot` (the scratch
+  script was a 30-line pyserial loop stamping `U-Boot SPL`, `Starting
+  kernel`, `starting pid`) against `$TMPDIR/adb.501.log`.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes

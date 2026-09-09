@@ -32,6 +32,9 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    to the same file. U-Boot uses its own DTB, so boot is unaffected.
 #  * usbproxy.cfg: build raw_gadget and the musb gadget stack into the kernel
 #    (=y) so /dev/raw-gadget exists at boot with nothing to modprobe.
+#    Also CONFIG_KERNEL_LZ4: the zImage self-decompression was most of the
+#    0.35 s between "Starting kernel" and the kernel's t=0 (boot-time work,
+#    2026-09-09; see DEVELOPMENT.md section 8).
 #  * usbproxy-resilience.cfg: panic_on_oops + 5s panic reboot + pstore/ramoops
 #    (pairs with the 0004 reserved-memory node).
 #  * 0006-soc-...bus-clock-policy: clock-framework-backed active/idle control
@@ -43,6 +46,9 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    the kernel sat in the 5 s control timeout with the device lock held, so
 #    usb-proxy's open() blocked 5 s per bootloader appearance. Placed before
 #    the dynamic quirks so usbcore.quirks=VID:PID:d can re-enable per device.
+# CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
+DEPENDS += "lz4-native"
+
 SRC_URI:append = " \
     file://0001-musb-gadget-service-pending-RX-packet-on-requeue.patch \
     file://0002-usb-musb-sunxi-force-peripheral.patch \

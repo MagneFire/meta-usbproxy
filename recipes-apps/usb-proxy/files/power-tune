@@ -1,7 +1,7 @@
 #!/bin/sh
 # Power tuning for the usb-proxy appliance.
 #
-#   power-tune [boot]   one-shot setup, run from inittab sysinit before usb-proxy
+#   power-tune [boot]   one-shot setup, forked from inittab (`once`) alongside usb-proxy
 #   power-tune active   wind up:   both cores, top OPP  (usb-proxy's power_hook)
 #   power-tune idle     wind down: one core,  low OPP   (usb-proxy's power_hook)
 #
