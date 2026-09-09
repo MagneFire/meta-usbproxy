@@ -635,7 +635,7 @@ Three layers now handle this:
 
 | Layer | What it covers | Where |
 |---|---|---|
-| CPU capped at 816 MHz (1008 OPP deleted) | Removes all rail switching — both remaining OPPs run at a constant 1.1 V. No perf cost: the proxy is USB-RTT-bound and idles at 648 MHz. | kernel patch `0004` |
+| CPU capped at 816 MHz (1008 OPP deleted) | Removes all rail switching — both remaining OPPs run at one voltage. 1.1 V until 2026-09-09; since then 1.3 V, the rail's power-on state (experiment, patch `0008`, see the decode below). No perf cost: the proxy is USB-RTT-bound and idles at 648 MHz. | kernel patches `0004`, `0008` |
 | `panic_on_oops` + panic timeout | Any oops/panic prints in full, then reboots ~10 s later instead of limping on with corrupt state (oops) or hanging forever (panic). (The Kconfig sets 5 s but meta-sunxi's `boot.scr` passes `panic=10` on the cmdline, which wins — fine.) | `usbproxy-resilience.cfg` |
 | Hardware watchdog, armed from U-Boot | Silent hard hangs anywhere from U-Boot through userspace → hardware reset in ≤8 s. U-Boot arms+feeds it (`CONFIG_WDT` + `CONFIG_WATCHDOG_AUTOSTART` — the latter is default-**off** on sunxi upstream and without it the boot window is unarmed), busybox `watchdog -T 8 -t 2` takes over from inittab. Boot banner must say `WDT: Started watchdog@1c20ca0 ... (8s timeout)`, not `WDT: Not starting`. | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
 
@@ -718,19 +718,105 @@ Consequences worth knowing:
   corrupted maple-tree node in a freshly created mm. That is the classic
   random-pointer signature on a boot whose DRAM size was right, so the
   misdetection explains the `free_initmem` crash and the pstore losses, not
-  every corruption. The remaining suspects are unchanged: supply/connector
-  droop at boot and marginal DRAM. Full record: `dmesg-ramoops-0/1` on the
-  board from that boot.
+  every corruption. Decoded below.
 - **First thing to check in any boot log: the `DRAM:` line.** If it is not
   256 MiB, nothing after it is meaningful.
 - If a 512 banner ever appears with the patch in place, the next step is a hard
   expected-size guard in the SPL (retry the DRAM init, then reset), not another
   clock reduction.
 
+**The residual oops, decoded (2026-09-09).** The record from soak boot 2 was
+read against the build's `vmlinux` (objdump in the OrbStack tree). The call
+chain is `get_arg_page` → `get_user_pages_remote` → `__get_user_pages` →
+`gup_vma_lookup` → `find_vma` → `mt_find`:
+
+- `get_user_pages_remote` keeps `mm` in `r8`, takes the mmap lock at `r8+0x7c`
+  (that worked, so `mm` was right), then passes it as `r0`.
+- `__get_user_pages` does `mov ip, r0` … `str ip, [sp, #16]` and later reloads
+  `ldr r0, [sp, #16]` for `gup_vma_lookup`; `find_vma` adds `0x40` (`mm_mt`),
+  `mt_find` derefs `+8`. Fault address `0x44495` = `0x4448d + 8`,
+  `0x4448d - 0x40 = 0x4444d`, and the stack dump shows `0004444d` in exactly
+  that spill slot (`d0a31e60`).
+- At the oops **`r8` still held the correct `mm_struct`** (`c12982c0`, which
+  the kernel itself identified as a live slab object), and every neighbouring
+  word in the spill slot's cache line (`current`, flags, the canary, `pages`,
+  `locked`) was intact.
+
+One spilled register came back as a different whole word, within a dozen
+instructions and with its source register untouched. A DRAM cell fault flips
+bits; a row/alias fault takes out a burst, not one word. This is on the CPU
+side: register file, store/forwarding path, L1/L2, or the IRQ save/restore
+path if an interrupt landed in that window. The older "memset with an odd
+destination register" and "clear_page at a garbage address" oopses are the
+same family (an address register going bad inside a store-only loop). The
+value `0x4444d` is most likely a stale pfn-sized word; it also falls inside
+U-Boot's PSCI monitor (`0x44000`–`0x47c00`), but nothing enters the monitor at
+0.73 s (no SMC, no hotplug), so that is a coincidence.
+
+**What the board is, per the v1.1 schematic and this unit's repairs (user,
+2026-09-08).** Read this before reasoning about supplies:
+
+- `vdd-cpux` is an SY8113B buck from DCIN-5V; its VSET (PL6, Q5) is pulled up
+  to VCC-RTC, so the **power-on state is 1.3 V** (the DT's `gpios-states = <1>`
+  is right). U-Boot runs the core at 1008 MHz there; the kernel drops the rail
+  to 1.1 V once cpufreq settles on 816 MHz.
+- **The board is powered at the 26-pin header's 5 V pin (DCIN-5V), not the
+  micro-USB.** The micro-USB VBUS goes through Q10 (AO3415A) with a BCM856BS
+  ideal-diode controller, so header power cannot backfeed the Mac's VBUS,
+  and the OTG connector carries data only. That retires the connector-droop
+  theory below as a corruption cause. The USB-A host port's VBUS is DCIN-5V
+  too.
+- **Repair on this PCB: U5 (the SY8008B AVCC buck) is dead. AVCC is fed from
+  U6 (PST73133BETV, a 300 mA LDO from DCIN-5V, the former WiFi supply), and
+  the WiFi IC is removed.** AVCC also feeds VCC3V-PLL (R25) and VCC-RTC (R46):
+  the CPU/DDR PLL supply and the PL-domain pull-ups now sit behind a small LDO
+  and a bodge. A PLL supply glitch would produce exactly the core-side
+  signature above.
+- VCC-DRAM 1.5 V is an SY8008B from VCC-5V (2.5–5.5 V input, tolerant of
+  droop). The SY8113B needs ≥ 4.5 V in, so a 5 V droop reaches the core rail
+  only if the board-side 5 V falls under ~4.5 V.
+- DRAM 312 MHz is tCK 3.2 ns; DDR3 with the DLL on is specified to 3.3 ns.
+  312 is the floor, not a step on a ladder.
+
+**Suspects, re-ranked:** (1) core rail / PLL margin during boot: cpufreq's
+648↔816 PLL relocks are densest at boot, the rail switches 1.3→1.1 V at
+cpufreq init, and the PLL supply is on a repaired path; (2) the header 5 V
+supply and its leads, only through regulator headroom; (3) DRAM cells, least
+likely for this signature.
+
+**Experiment ladder (2026-09-09):**
+
+1. Patch `0008` holds `vdd-cpux` at 1.3 V at both OPPs: no rail switch per
+   boot, the core at the margin of the stock top state. Deploy with
+   `scripts/appliance.py flash --adb`, then `appliance.py soak 100`. At the
+   observed ~1/23 rate, 100 clean boots means the rate dropped (99 %).
+   **Result 2026-09-09: 100/100 warm boots, all 256 MiB, no oops, pstore
+   empty** (`~/.cache/appliance/soak-20260909-190600.log`); the regulator
+   read 1300000 µV and did not move across `power-tune idle|active`; `mtest
+   0x40000000 0x4a000000 0 1` from the U-Boot prompt: 0 errors; `check
+   --reboot --adb` all PASS; a 50 MB `adb push` through the proxy was
+   md5-exact in 9.7 s. That is the first run of that length without an
+   oops on this board. Kept. It does not say *which* of the two things it
+   removed mattered (the 1.3→1.1 V step at cpufreq init, or core margin at
+   1.1 V), only that the rail was in the loop; step 2 would tell, if it is
+   ever worth knowing. The cold-power soak (`soak 20 --cold`) is still owed.
+2. If it still oopses: `CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y` with 1.1 V
+   restored removes the boot-window relocks and separates "transitions" from
+   "voltage".
+3. If both still oops, the AVCC/PLL repair needs a scope (AVCC, VCC3V-PLL,
+   VDD-CPUX and the header 5 V pin during the 0.3–1 s boot window), or the
+   same image on an unrepaired Orange Pi Zero for 100 boots.
+4. DRAM, to exclude rather than chase: `mtest 0x40000000 0x4a000000 0 20` from
+   a cold U-Boot prompt (`CONFIG_CMD_MEMTEST`, `uboot-console.py --catch`)
+   and `memtester 64M 20` on the running appliance, both in the image now.
+   Cold power-ons: `appliance.py soak 20 --cold` (it prompts for each
+   power-cycle and saves any pstore record next to its log).
+
 **Earlier theory (2026-08-06, user's, unproven): a flaky micro-USB OTG
-connector.** Demoted by the finding above, but not excluded — it would still
-explain the stale enumerations and wedged Mac USB ports. It explains what the
-clock changes could not:
+connector.** Retired for the corruption on 2026-09-09 (the board is powered
+at the header, see above); kept because it may still explain the stale
+enumerations and wedged Mac USB ports. It explained what the clock changes
+could not:
 
 - The corruption *persisted* through 624→480, through the DVFS rail fix, and
   through 480→408. A cause that was never DRAM would behave exactly like that.

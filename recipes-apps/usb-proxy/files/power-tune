@@ -21,12 +21,14 @@ SPARE_CPU=/sys/devices/system/cpu/cpu1/online
 BUS_CLOCK_MODE=/sys/devices/platform/usbproxy-bus-clocks/mode
 
 # The OPP table has exactly two entries after kernel patch 0004 deleted the
-# 1008MHz one. Both run at 1.1V (vdd-cpux is a two-state GPIO regulator and only
-# 1008 needed 1.3V), so moving between them never switches the rail — that rail
-# flapping was the crash suspect patch 0004 removed, and nothing here reinstates
-# it. Note there is no `powersave` governor compiled in (available: ondemand,
-# performance, schedutil), so the OPP is selected via scaling_max_freq while the
-# governor stays `performance` throughout.
+# 1008MHz one. Both run at one voltage (vdd-cpux is a two-state GPIO regulator,
+# 1.1V/1.3V; patch 0004 left both OPPs at 1.1V, patch 0008 moved both to 1.3V
+# on 2026-09-09 as an experiment against the residual corruption), so moving
+# between them never switches the rail — that rail flapping was the crash
+# suspect patch 0004 removed, and nothing here reinstates it. Note there is no
+# `powersave` governor compiled in (available: ondemand, performance,
+# schedutil), so the OPP is selected via scaling_max_freq while the governor
+# stays `performance` throughout.
 FREQ_HIGH=816000
 FREQ_LOW=648000
 

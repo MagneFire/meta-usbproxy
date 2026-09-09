@@ -46,6 +46,13 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    the kernel sat in the 5 s control timeout with the device lock held, so
 #    usb-proxy's open() blocked 5 s per bootloader appearance. Placed before
 #    the dynamic quirks so usbcore.quirks=VID:PID:d can re-enable per device.
+#  * 0008-dts-...vdd-cpux-1v3: hold the vdd-cpux rail at its 1.3V power-on
+#    state at both remaining OPPs. Experiment (2026-09-09) against the
+#    corruption that survived the SPL DRAM fix: that oops decoded to a
+#    core-side fault (a spilled register came back as a different word while
+#    its source register was intact), so the rail is under test. Separate
+#    from 0004 so it can be dropped alone if it changes nothing. See
+#    DEVELOPMENT.md section 9.
 # CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
 DEPENDS += "lz4-native"
 
@@ -57,6 +64,7 @@ SRC_URI:append = " \
     file://0005-dts-orangepi-zero-disable-mmc0.patch \
     file://0006-soc-sunxi-add-usbproxy-bus-clock-policy.patch \
     file://0007-usb-core-skip-config-and-interface-strings.patch \
+    file://0008-dts-orangepi-zero-vdd-cpux-1v3.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

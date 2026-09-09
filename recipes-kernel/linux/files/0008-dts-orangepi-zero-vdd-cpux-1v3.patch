@@ -1,0 +1,47 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: hold vdd-cpux at 1.3 V at every OPP
+
+Experiment against the residual boot-time corruption (DEVELOPMENT.md
+section 9). With the SPL DRAM-size misdetection fixed, one boot in 23
+still oopsed at 0.73 s: power-tune in mt_find from find_vma during its
+own execve. Decoded against vmlinux, the mm pointer was still correct in
+r8, but the copy that __get_user_pages spilled to [sp, #16] and reloaded
+came back as 0x4444d with every neighbouring word intact. That is a
+core-side fault (register / store path / cache), not a DRAM cell, and it
+belongs with the earlier "odd address register in memset" oopses.
+
+The board's vdd-cpux is a two-state GPIO regulator whose power-on state
+is 1.3 V (Q5 pulled up to VCC-RTC); U-Boot runs 1008 MHz there and the
+kernel drops the rail to 1.1 V once cpufreq settles on 816 MHz. Pin
+both remaining OPPs at 1.3 V: the rail never switches, and the core runs
+with the margin of the stock top state. Applies after 0004 (which deletes
+the 1008 MHz OPP) and 0005.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -166,6 +166,23 @@
+  * is USB-latency-bound and idles at 648 MHz, so 816 costs nothing. */
+ &cpu0_opp_table {
+ 	/delete-node/ opp-1008000000;
++
++	/* usb-proxy appliance (2026-09-09): hold vdd-cpux at 1.3 V, its
++	 * power-on state, at both remaining OPPs. A boot that still oopsed
++	 * with the DRAM size right decoded to a core-side fault (a spilled
++	 * register came back as a different word while its source register
++	 * was intact), so the rail is under test: at 1.3 V it never switches
++	 * and the core has the margin it gets at the stock 1008 MHz state.
++	 * 1.3 V is within the SoC's rating; the appliance idles at 648 MHz
++	 * and the extra draw is far below what the meter can resolve
++	 * (DEVELOPMENT.md section 9). */
++	opp-648000000 {
++		opp-microvolt = <1300000 1300000 1300000>;
++	};
++
++	opp-816000000 {
++		opp-microvolt = <1300000 1300000 1300000>;
++	};
+ };
+ 
+ &ehci0 {
