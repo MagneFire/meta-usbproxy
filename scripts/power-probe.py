@@ -52,7 +52,7 @@ cmd = f"snap(){{ {SNAP}; }}; echo ==A; snap; sleep {interval:g}; echo ==B; snap;
 out = subprocess.run(
     ["uv", "run", str(here / "pi-serial.py"), cmd, str(interval + 6)],
     capture_output=True, text=True, cwd=here.parent,
-    env={**os.environ, "PI_DEV": os.environ.get("PI_DEV", "/dev/tty.usbserial-10")},
+    env=os.environ,
 ).stdout
 
 lines = [l.rstrip() for l in out.splitlines()]

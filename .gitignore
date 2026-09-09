@@ -5,3 +5,4 @@
 /tmp/
 /downloads/
 /sstate-cache/
+__pycache__/

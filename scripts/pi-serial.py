@@ -22,25 +22,23 @@ If the file is executable you can also run it directly (the shebang invokes uv):
 
     ./scripts/pi-serial.py "<command>"
 
-The serial device node varies between dongles/reconnects (it has been
-/dev/tty.usbserial-10 and /dev/tty.usbserial-11410). Find it with
-`ls /dev/tty.usbserial-*` and override the default via the PI_DEV env var:
+The serial device node varies between dongles/reconnects (-10, -110 and -11410
+have all been seen). With one dongle plugged in it is found automatically; set
+PI_DEV to pick one when there are several:
 
     PI_DEV=/dev/tty.usbserial-XXXX uv run scripts/pi-serial.py "<command>"
 
-Tip: to drop a file onto the appliance without paste/quoting trouble, base64 it
-on the Mac and decode it on the Pi (no nested quotes):
-
-    b64=$(base64 < some.json)
-    uv run scripts/pi-serial.py "echo $b64 | base64 -d > /etc/usb-proxy/config.json"
+To drop a file onto the appliance use scripts/serial-upload.py (busybox here has
+no base64 applet). For the whole build/deploy/check loop see scripts/appliance.py.
 """
-import os
 import sys
 import time
 
 import serial
 
-DEV = os.environ.get("PI_DEV", "/dev/tty.usbserial-10")
+import applib
+
+DEV = applib.serial_node()
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 secs = float(sys.argv[2]) if len(sys.argv) > 2 else 4.0
 

@@ -23,16 +23,17 @@ the SD card (the rootfs is RAM-backed, so this does not survive a reboot):
     uv run scripts/serial-upload.py usb-proxy.gz /tmp/up.gz
     uv run scripts/pi-serial.py \
         "gunzip -f /tmp/up.gz && chmod +x /tmp/up && mv /tmp/up /usr/bin/usb-proxy \
-         && kill -9 \$(pidof usb-proxy)" 8   # inittab respawns the new binary
+         && kill -9 \\$(pidof usb-proxy)" 8   # inittab respawns the new binary
 """
 import hashlib
-import os
 import sys
 import time
 
 import serial
 
-DEV = os.environ.get("PI_DEV", "/dev/tty.usbserial-10")
+import applib
+
+DEV = applib.serial_node()
 local, remote = sys.argv[1], sys.argv[2]
 CHUNK = 225  # busybox ash line editing silently truncates input at 1024 chars
              # (CONFIG_FEATURE_EDITING_MAX_LEN); 225*4 escapes + ~35 overhead
