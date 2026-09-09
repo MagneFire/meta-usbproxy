@@ -19,7 +19,9 @@ by the same `check` so "did it take?" is never a guess:
               watchdog armed, no oops, login reached, /etc/buildinfo and the
               usb-proxy md5 match the build, the real proxy is running, pstore
               empty, and (--adb) the watch shows up in `adb devices`.
-    soak N    warm-reboot N times and grade each boot (scripts/boot-soak.py).
+    soak N    reboot N times and grade each boot (scripts/boot-soak.py);
+              --cold asks you to power-cycle instead (or runs --power-cmd),
+              and a boot that oopsed has its pstore records saved and cleared.
 
 Typical use:
 
@@ -404,8 +406,15 @@ def cmd_flash(args):
 # --------------------------------------------------------------------------- #
 def cmd_soak(args):
     LOGDIR.mkdir(parents=True, exist_ok=True)
-    logp = LOGDIR / f"soak-{time.strftime('%Y%m%d-%H%M%S')}.log"
-    r = subprocess.run(["uv", "run", str(HERE / "boot-soak.py"), str(args.n), str(logp)], cwd=REPO)
+    tag = "soak-cold" if args.cold else "soak"
+    logp = LOGDIR / f"{tag}-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    cmd = ["uv", "run", str(HERE / "boot-soak.py"), str(args.n), str(logp)]
+    if args.cold:
+        cmd.append("--cold")
+    if args.power_cmd:
+        cmd += ["--power-cmd", args.power_cmd]
+    say(f"console transcript: {logp} (oops records land next to it)")
+    r = subprocess.run(cmd, cwd=REPO)
     sys.exit(r.returncode)
 
 
@@ -440,8 +449,10 @@ def main():
     p.add_argument("--no-expect", action="store_true", help="do not compare against the deploy dir")
     p.set_defaults(fn=cmd_check)
 
-    p = sub.add_parser("soak", help="warm-reboot N times")
+    p = sub.add_parser("soak", help="reboot (or power-cycle) N times and grade each boot")
     p.add_argument("n", type=int, nargs="?", default=5)
+    p.add_argument("--cold", action="store_true", help="power-cycle instead of reboot (prompts you)")
+    p.add_argument("--power-cmd", help="command that cycles the supply, for --cold")
     p.set_defaults(fn=cmd_soak)
 
     args = ap.parse_args()
