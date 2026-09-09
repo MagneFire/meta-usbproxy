@@ -3,295 +3,185 @@
 # requires-python = ">=3.9"
 # dependencies = ["pyserial"]
 # ///
-"""uboot-flash.py — update the appliance's SD over the U-Boot serial console.
+"""uboot-flash.py — put a file on the appliance through the U-Boot serial console.
 
 Runs on the Mac. No card removal, and no MMC driver needed in Linux: U-Boot has
 its own, so this works even though the appliance's kernel has CONFIG_MMC=n.
 
-Why this exists: the DRAM clock is compiled into the SPL, so every DRAM
-experiment used to mean powering down, pulling the card, carrying it to the Mac,
-bmaptool, and putting it back. This does the same job in about a minute.
-
-    # Update U-Boot itself, at the U-Boot prompt:
-    uv run scripts/uboot-flash.py u-boot-sunxi-with-spl.bin
+    # Update U-Boot itself (SPL + U-Boot proper, raw sector 0x10):
+    uv run scripts/uboot-flash.py --catch u-boot-sunxi-with-spl.bin
 
     # Update one file in the FAT boot partition (kernel or DTB):
-    uv run scripts/uboot-flash.py --fat uImage uImage-initramfs.bin
-    uv run scripts/uboot-flash.py --fat sun8i-h2-plus-orangepi-zero.dtb board.dtb
+    uv run scripts/uboot-flash.py --catch --fat uImage uImage-initramfs-orange-pi-zero.bin
+    uv run scripts/uboot-flash.py --catch --fat sun8i-h2-plus-orangepi-zero.dtb board.dtb
+
+    # Boot a kernel from RAM without writing the card at all (RAM-only test of
+    # a whole image; the card's own kernel comes back on the next reboot):
+    uv run scripts/uboot-flash.py --catch --boot uImage-initramfs-orange-pi-zero.bin
+
+    # Faster transfers (43 KB/s instead of 9), U-Boot built with
+    # CONFIG_SYS_LOADS_BAUD_CHANGE; 750000 is the rate the UART divides exactly:
+    uv run scripts/uboot-flash.py --catch --baud 750000 --fat uImage ...
+
+The kernel file to send is always the `uImage-initramfs-*.bin` one (~6 MB, the
+rootfs is inside it). The plain `uImage-*.bin` next to it in the deploy
+directory is the kernel alone; flashed as /uImage it hangs at "Starting
+kernel" with no init and needs a power-cycle. This script refuses a kernel file
+without "initramfs" in its name unless --allow-plain-kernel is given.
 
 Getting a U-Boot prompt: CONFIG_BOOTDELAY is 0, but autoboot can still be
-interrupted by spamming a key while the board powers up. Either reset the board
-and hold a key (then run this without --catch), or pass --catch to have this
-script reboot the board and catch the prompt itself, in the same serial
-session:
+interrupted by spamming a key while the board comes up. --catch reboots the
+board (from Linux or from U-Boot) and catches the prompt in the same serial
+session. Without --catch the script confirms it is at `=>` before sending
+anything and aborts if it is not, so a missed catch never runs blind against
+the card.
 
-    uv run scripts/uboot-flash.py --catch --fat uImage uImage-initramfs.bin
+What it does, all over the one serial line:
 
-Without --catch the script confirms it is at `=>` before sending anything and
-aborts if it is not, so a missed catch never runs blind against the card.
+    loady <addr>              # U-Boot receives a Y-modem batch (sent inline, no lrzsz)
+    crc32 <addr> <len>        # the transfer is verified in RAM first, always
+    # then one of:
+    mmc write <addr> 0x10 <blocks>; mmc read ...; crc32     (U-Boot)
+    fatwrite mmc 0:1 <addr> <name> <len>; fatload ...; crc32 (--fat)
+    fatload mmc 0:1 ${fdt_addr_r} ${fdtfile}; bootm <addr> - ${fdt_addr_r} (--boot)
 
-For U-Boot itself it does, all over the one serial line:
+Sector 0x10 (8 KiB) is where sunxi looks for the SPL and matches the wic layout
+(`part u-boot ... --align 8`); the FAT partition starts at sector 4096, so a
+~520 KB U-Boot is nowhere near it. --fat and --boot never touch the SPL.
+--boot uses the bootargs from meta-sunxi's boot.cmd (the kernel is built with
+CMDLINE_EXTEND, so they matter) and then follows the console until login.
 
-    loady 0x42000000          # U-Boot waits for a Y-modem batch
-    <this script sends the file>
-    mmc dev 0
-    mmc write 0x42000000 0x10 <blocks>
-
-Sector 0x10 (8 KiB) is where sunxi looks for the SPL, and it matches the wic
-layout (`part u-boot ... --align 8`). The FAT boot partition does not start until
-sector 4096, so there is a ~2 MB window here and a 521 KB U-Boot is nowhere near
-it. Nothing else on the card is touched. In `--fat` mode the same verified
-transfer updates one named file in the FAT boot partition, loads it back, and
-checks its CRC before allowing a reset.
-
-Y-modem is implemented inline rather than shelling out to `sz`, so there is
-nothing to `brew install`.
+PI_DEV overrides the serial node; otherwise the single /dev/tty.usbserial-*
+present is used.
 """
 import os
 import sys
 import time
 
-import serial
+import applib as A
 
-SOH, STX, EOT, ACK, NAK, CAN, CRC = 0x01, 0x02, 0x04, 0x06, 0x15, 0x18, 0x43
-
-DEV = os.environ.get("PI_DEV", "/dev/tty.usbserial-10")
-LOAD_ADDR = os.environ.get("UB_ADDR", "0x42000000")
 SECTOR = 512
 SPL_SECTOR = 0x10  # sunxi SPL offset, 8 KiB
+LOAD_ADDR = os.environ.get("UB_ADDR", "0x42000000")   # == ${kernel_addr_r} here
+READBACK = "0x43000000"
+
+# The bootargs meta-sunxi's boot.scr sets. root= is meaningless with a bundled
+# initramfs but harmless, and keeping the line identical means a RAM boot
+# tests the same cmdline the card boots with.
+BOOTARGS = "console=${console} console=tty1 root=/dev/mmcblk0p2 rootwait panic=10 ${extra}"
+
+
+def usage():
+    sys.exit(__doc__)
+
 
 argv = sys.argv[1:]
 catch = "--catch" in argv
-argv = [a for a in argv if a != "--catch"]
+allow_plain = "--allow-plain-kernel" in argv
+argv = [a for a in argv if a not in ("--catch", "--allow-plain-kernel")]
+baud = None
+if "--baud" in argv:
+    i = argv.index("--baud")
+    try:
+        baud = int(argv[i + 1])
+    except (IndexError, ValueError):
+        usage()
+    del argv[i:i + 2]
 
+mode = "uboot"
 if len(argv) == 3 and argv[0] == "--fat":
-    fat_dest = argv[1]
-    path = argv[2]
+    mode, fat_dest, path = "fat", argv[1], argv[2]
+elif len(argv) == 2 and argv[0] == "--boot":
+    mode, fat_dest, path = "boot", None, argv[1]
 elif len(argv) == 1:
-    fat_dest = None
-    path = argv[0]
+    fat_dest, path = None, argv[0]
 else:
-    sys.exit(__doc__)
+    usage()
+
 data = open(path, "rb").read()
 blocks = (len(data) + SECTOR - 1) // SECTOR
-if fat_dest:
-    print(f"{os.path.basename(path)}: {len(data)} bytes -> FAT /{fat_dest}")
+base = os.path.basename(path)
+
+is_kernel = mode == "boot" or (mode == "fat" and fat_dest == "uImage")
+if is_kernel and "initramfs" not in base and not allow_plain:
+    sys.exit(f"{base}: a kernel without 'initramfs' in its name is the kernel-only "
+             "build and hangs at 'Starting kernel' (no init). Send the "
+             "uImage-initramfs-*.bin, or pass --allow-plain-kernel if you mean it.")
+
+if mode == "fat":
+    print(f"{base}: {len(data)} bytes -> FAT /{fat_dest}")
+elif mode == "boot":
+    print(f"{base}: {len(data)} bytes -> RAM {LOAD_ADDR}, then bootm (card untouched)")
 else:
-    print(f"{os.path.basename(path)}: {len(data)} bytes -> {blocks} sectors (0x{blocks:x})")
+    print(f"{base}: {len(data)} bytes -> {blocks} sectors (0x{blocks:x}) at 0x{SPL_SECTOR:x}")
 
-ser = serial.Serial(DEV, 115200, timeout=1)
+ser = A.open_serial(timeout=1.0)
 
-
-def crc16(buf):
-    crc = 0
-    for b in buf:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
-
-
-def send_cmd(cmd, wait=1.0):
-    ser.reset_input_buffer()
-    ser.write((cmd + "\n").encode())
-    ser.flush()
-    time.sleep(wait)
-    return ser.read(ser.in_waiting or 1).decode(errors="replace")
-
-
-def wait_for(byte, timeout=15.0, label=""):
-    """Wait for one specific control byte from the receiver."""
-    end = time.time() + timeout
-    while time.time() < end:
-        d = ser.read(1)
-        if d and d[0] == byte:
-            return True
-        if d and d[0] == CAN:
-            sys.exit(f"receiver cancelled during {label}")
-    return False
-
-
-def send_block(seq, payload):
-    """One Y-modem block, retried a few times on NAK."""
-    head = STX if len(payload) > 128 else SOH
-    frame = bytes([head, seq & 0xFF, (~seq) & 0xFF]) + payload
-    frame += crc16(payload).to_bytes(2, "big")
-    for attempt in range(10):
-        ser.write(frame)
-        ser.flush()
-        end = time.time() + 10
-        while time.time() < end:
-            d = ser.read(1)
-            if not d:
-                continue
-            if d[0] == ACK:
-                return
-            if d[0] in (NAK, CRC):
-                break  # resend
-            if d[0] == CAN:
-                sys.exit("receiver cancelled")
-    sys.exit(f"block {seq} not acknowledged after 10 attempts")
-
-
-# --- make sure we are actually at the `=>` prompt before writing anything ----
-# The earlier version printed "(assuming => prompt)" and sent loady regardless;
-# when --catch failed to interrupt autoboot, the loady went to a booting Linux
-# and only the CRC handshake timeout below caught it. Confirm the prompt here
-# and refuse to go further without it, so a missed catch never runs blind at
-# the card. --catch and the write are one serial session now, so the prompt
-# state cannot be lost between two script invocations.
-def confirm_prompt(tries=3):
-    """Return True once a bare CR echoes the U-Boot `=>` prompt back."""
-    for _ in range(tries):
-        ser.reset_input_buffer()
-        ser.write(b"\r\n")
-        ser.flush()
-        time.sleep(0.4)
-        if b"=>" in ser.read(ser.in_waiting or 1):
-            return True
-    return False
-
-
-def catch_prompt(timeout=30):
-    """Reboot the board and hammer a key until autoboot drops to `=>`.
-
-    Same method as uboot-console.py --catch: a printable char each poll breaks
-    the (bootdelay=0) autoboot window, which is still interruptible."""
-    saved_timeout = ser.timeout
-    ser.timeout = 0.05
-    # Kick Linux over. Harmless at a login prompt (it ignores the command).
-    ser.write(b"\n")
-    time.sleep(0.3)
-    ser.write(b"root\n")
-    time.sleep(0.8)
-    ser.write(b"reboot -f\n")
-    ser.flush()
-    buf = b""
-    end = time.time() + timeout
-    got = False
-    while time.time() < end:
-        ser.write(b"a")
-        d = ser.read(ser.in_waiting or 1)
-        if d:
-            buf += d
-            if b"=>" in buf[-200:]:
-                got = True
-                break
-        time.sleep(0.004)
-    time.sleep(0.5)
-    ser.write(b"\x03")  # clear the line of accumulated spam
-    ser.flush()
-    time.sleep(0.5)
-    ser.reset_input_buffer()
-    ser.timeout = saved_timeout
-    return got
-
-
+# --- be at `=>` before anything is sent ---------------------------------------
 if catch:
-    if not catch_prompt():
+    if not A.ub_catch_prompt(ser):
         sys.exit("did not reach the `=>` prompt within 30s — nothing written")
     print("at U-Boot prompt (caught)")
-elif not confirm_prompt():
-    sys.exit(
-        "not at the `=>` prompt — nothing written. Reset the board and spam a "
-        "key to catch it, or re-run with --catch to reboot and catch it here."
-    )
+elif not A.ub_confirm_prompt(ser):
+    sys.exit("not at the `=>` prompt — nothing written. Re-run with --catch to "
+             "reboot and catch it here.")
 
-# --- hand U-Boot the loady command, then speak Y-modem at it -----------------
-ser.reset_input_buffer()
-ser.write(f"loady {LOAD_ADDR}\n".encode())
-ser.flush()
+# --- transfer + crc32 in RAM ----------------------------------------------------
+want = A.ub_loady(ser, LOAD_ADDR, data, base, baud=baud)
 
-if not wait_for(CRC, timeout=15, label="loady handshake"):
-    sys.exit("U-Boot never asked for a Y-modem transfer — are you at the `=>` prompt?")
+# --- RAM boot -------------------------------------------------------------------
+if mode == "boot":
+    out = A.ub_send(ser, "fatload mmc 0:1 ${fdt_addr_r} ${fdtfile}", 3.0)
+    if "bytes read" not in out.lower():
+        sys.exit(f"could not load the DTB from the card:\n{out}")
+    A.ub_send(ser, f"setenv bootargs {BOOTARGS}", 0.5)
+    ser.reset_input_buffer()
+    ser.write(f"bootm {LOAD_ADDR} - ${{fdt_addr_r}}\n".encode())
+    ser.flush()
+    ser.timeout = 0.05
+    text = A.watch_boot(ser, timeout=60)
+    sys.stdout.write(text)
+    r = A.boot_report(text)
+    print()
+    if r["login"] and not r["oops"]:
+        print("RAM boot reached login. This kernel is gone on the next reboot.")
+        sys.exit(0)
+    sys.exit(f"RAM boot did not reach login: {r}")
 
-# Block 0 carries the filename and size.
-name = os.path.basename(path).encode()
-hdr = name + b"\0" + str(len(data)).encode() + b"\0"
-send_block(0, hdr.ljust(128, b"\0"))
-if not wait_for(CRC, timeout=15, label="header ack"):
-    sys.exit("receiver did not request data after the header block")
+# --- commit to the card ---------------------------------------------------------
+print(A.ub_send(ser, "mmc dev 0", 1.5))
 
-t0 = time.time()
-seq = 1
-for off in range(0, len(data), 1024):
-    chunk = data[off:off + 1024]
-    send_block(seq, chunk.ljust(1024, b"\x1a"))
-    seq += 1
-    if seq % 32 == 0 or off + 1024 >= len(data):
-        done = min(off + 1024, len(data))
-        rate = done / (time.time() - t0)
-        print(f"  {done}/{len(data)} bytes ({rate:.0f} B/s)")
-
-# End of file. Strict Y-modem says the receiver NAKs the first EOT and ACKs the
-# second, but U-Boot's xyzModem does not always play that back the same way (it
-# has been seen to answer with CAN). The transfer is already complete and
-# verified by then, so treat anything here as good enough and just drain: the
-# real check is the crc32 below, not the shape of this handshake.
-ser.write(bytes([EOT]))
-ser.flush()
-time.sleep(0.3)
-ser.read(ser.in_waiting or 1)
-ser.write(bytes([EOT]))
-ser.flush()
-time.sleep(0.5)
-ser.read(ser.in_waiting or 1)
-
-time.sleep(1.5)
-ser.read(ser.in_waiting or 1)
-
-# --- verify RAM before touching the card -------------------------------------
-# This is the real integrity check on the transfer. Do not skip it: a bad write
-# to sector 0x10 leaves a board that cannot boot far enough to be reflashed this
-# way, and the recovery is pulling the card.
-import zlib
-want = zlib.crc32(data) & 0xFFFFFFFF
-out = send_cmd(f"crc32 {LOAD_ADDR} {len(data):x}", 3.0)
-if f"{want:08x}" not in out.lower():
-    sys.exit(f"CRC32 mismatch — RAM does not hold the file (wanted {want:08x}):\n{out}")
-print(f"crc32 {want:08x} verified in RAM")
-
-# --- commit it to the card ---------------------------------------------------
-print(send_cmd("mmc dev 0", 1.5))
-
-if fat_dest:
-    out = send_cmd(f"fatwrite mmc 0:1 {LOAD_ADDR} {fat_dest} {len(data):x}", 8.0)
+if mode == "fat":
+    out = A.ub_send(ser, f"fatwrite mmc 0:1 {LOAD_ADDR} {fat_dest} {len(data):x}", 8.0)
     print(out)
     if "bytes written" not in out.lower():
         sys.exit("fatwrite did not report success — do NOT reset; check the console")
-
-    # Read the file through the filesystem, then check exactly its source size.
-    # This catches both a bad media write and accidentally targeting the wrong
-    # partition or filename.
-    READBACK = "0x43000000"
-    out = send_cmd(f"fatload mmc 0:1 {READBACK} {fat_dest}", 8.0)
+    # Read the file back through the filesystem and check exactly its source
+    # size: catches a bad media write and a wrong partition or filename alike.
+    out = A.ub_send(ser, f"fatload mmc 0:1 {READBACK} {fat_dest}", 8.0)
     print(out)
     if "bytes read" not in out.lower():
         sys.exit("fatload readback failed — do NOT reset; rewrite the file")
-    out = send_cmd(f"crc32 {READBACK} {len(data):x}", 3.0)
-    if f"{want:08x}" not in out.lower():
-        sys.exit(f"READBACK MISMATCH for {fat_dest} (wanted {want:08x}):\n"
-                 f"{out}\nDo NOT reset; rewrite the file.")
-    print(f"/{fat_dest} readback verified ({want:08x})")
+    got = A.ub_crc32(ser, READBACK, len(data))
+    if got != want:
+        sys.exit(f"READBACK MISMATCH for {fat_dest} (wanted {want}, got {got}). "
+                 "Do NOT reset; rewrite the file.")
+    print(f"/{fat_dest} readback verified ({want})")
     ser.close()
     sys.exit(0)
 
-out = send_cmd(f"mmc write {LOAD_ADDR} {SPL_SECTOR:x} {blocks:x}", 3.0)
+out = A.ub_send(ser, f"mmc write {LOAD_ADDR} {SPL_SECTOR:x} {blocks:x}", 3.0)
 print(out)
 if "OK" not in out and "written" not in out.lower():
     sys.exit("mmc write did not report success — do NOT power cycle; check the console")
 
-# --- read it back off the card and check it -----------------------------------
-# The RAM check above only proves the transfer was good; this proves the card
-# actually holds what we think it does. Worth the extra two seconds: if a board
-# then fails to boot, this is what tells you the setting is at fault rather than
-# the flashing, and that distinction is otherwise very hard to make.
-READBACK = "0x43000000"
-send_cmd(f"mmc read {READBACK} {SPL_SECTOR:x} {blocks:x}", 3.0)
-out = send_cmd(f"crc32 {READBACK} {len(data):x}", 3.0)
-if f"{want:08x}" not in out.lower():
-    sys.exit(f"READBACK MISMATCH — the card does not hold the file (wanted {want:08x}):\n"
-             f"{out}\nDo NOT power cycle; reflash before resetting.")
-print(f"readback from card verified ({want:08x})")
+# The RAM check proves the transfer; this proves the card holds it. A board
+# that then fails to boot is the setting's fault, not the flashing's.
+A.ub_send(ser, f"mmc read {READBACK} {SPL_SECTOR:x} {blocks:x}", 3.0)
+got = A.ub_crc32(ser, READBACK, len(data))
+if got != want:
+    sys.exit(f"READBACK MISMATCH — the card does not hold the file (wanted {want}, got {got}). "
+             "Do NOT power cycle; reflash before resetting.")
+print(f"readback from card verified ({want})")
 print("Written. Reset the board to run the new U-Boot.")
 ser.close()
