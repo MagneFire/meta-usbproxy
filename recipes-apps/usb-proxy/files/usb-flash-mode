@@ -6,6 +6,9 @@
 # reads 0 after a cold power-on): usbproxy-boot.cmd checks it, clears it and
 # runs `dfu 0 mmc 0 120`. The rootfs is a RAM cpio, nothing needs syncing.
 set -e
+# devmem and reboot are sbin applets; the USB console's shell may not have
+# the sbin dirs on its PATH.
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
 MAGIC=0x44465531	# "DFU1"
 REG=0x01f00100
 devmem $REG 32 $MAGIC
