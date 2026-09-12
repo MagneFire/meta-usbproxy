@@ -15,6 +15,12 @@ by the same `check` so "did it take?" is never a guess:
     flash     the final image, card in the board: uImage (and DTB, boot.scr,
               U-Boot only when they differ from the card) over the U-Boot
               console, verified by readback, then reset and check.
+              --usb does the same over the OTG port instead of the UART:
+              the board is asked to reboot into U-Boot's DFU mode
+              (/usr/bin/usb-flash-mode sets an RTC flag) and dfu-util writes
+              and reads back the files at USB speed. Needs `brew install
+              dfu-util` and a card whose U-Boot/boot.scr already carry the
+              DFU support (flash them once over the UART).
     check     what must be true after any of the above: DRAM banner 256 MiB,
               watchdog armed, no oops, login reached, /etc/buildinfo and the
               usb-proxy md5 match the build, the real proxy is running, pstore
@@ -28,6 +34,7 @@ Typical use:
     uv run scripts/appliance.py swap              # devtool workspace -> board
     uv run scripts/appliance.py boot-ram          # deploy dir uImage -> RAM
     uv run scripts/appliance.py flash --adb       # deploy dir -> card, verify
+    uv run scripts/appliance.py flash --usb --adb # same, over the OTG port
     uv run scripts/appliance.py check --adb
 
 Build side: the Yocto tree lives in the OrbStack machine at ~/yocto/usbproxy
@@ -73,6 +80,13 @@ FAT_FILES = {
 }
 UBOOT_FILE = "u-boot-sunxi-with-spl.bin"
 INITRAMFS = "usbproxy-initramfs-orange-pi-zero.cpio.gz"
+
+# U-Boot's DFU gadget (USB_GADGET_VENDOR_NUM/PRODUCT_NUM defaults for sunxi) and
+# the alt names usbproxy-boot.cmd puts in dfu_alt_info: the FAT files are alts
+# under their own names, "u-boot" is the raw SPL region (sector 0x10, 1 MiB).
+DFU_ID = "1f3a:1010"
+DFU_UBOOT_ALT = "u-boot"
+DFU_UBOOT_RAW_BYTES = 0x800 * 512
 
 OE = ("export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; cd ~/yocto/usbproxy && "
       "source layers/poky/oe-init-build-env build >/dev/null && ")
@@ -353,6 +367,8 @@ def cmd_boot_ram(args):
 # flash
 # --------------------------------------------------------------------------- #
 def cmd_flash(args):
+    if args.usb:
+        return cmd_flash_usb(args)
     files = {}
     for fat, dep in FAT_FILES.items():
         p = kernel_file(None) if fat == "uImage" else deploy_path(dep)
@@ -404,6 +420,183 @@ def cmd_flash(args):
 
 
 # --------------------------------------------------------------------------- #
+# flash --usb (U-Boot DFU over the OTG port)
+# --------------------------------------------------------------------------- #
+def dfu(*args, timeout=900):
+    cmd = ["dfu-util", "-d", DFU_ID] + [str(a) for a in args]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        fail("dfu-util not found: brew install dfu-util")
+    return r.returncode, r.stdout + r.stderr
+
+
+def dfu_present():
+    rc, out = dfu("-l", timeout=30)
+    return rc == 0 and DFU_ID in out and "Found DFU" in out
+
+
+def dfu_wait(timeout=60):
+    end = time.time() + timeout
+    while time.time() < end:
+        if dfu_present():
+            return True
+        time.sleep(1)
+    return False
+
+
+def dfu_upload(alt, size=None):
+    """Read an alt back (the FAT file, or `size` raw bytes)."""
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+    tmp = LOGDIR / f"dfu-upload-{alt}"
+    tmp.unlink(missing_ok=True)
+    args = ["-a", alt, "-U", str(tmp)]
+    if size:
+        args += ["-Z", str(size)]
+    rc, out = dfu(*args)
+    if rc != 0 or not tmp.exists():
+        # An absent FAT file reads back as an error; treat it as empty.
+        return b""
+    return tmp.read_bytes()
+
+
+def dfu_download(alt, data, name, reset=False):
+    """Write an alt. reset=True adds -R: dfu-util sends DFU_DETACH and a USB
+    reset after the download, which is what makes U-Boot's dfu loop return and
+    do_reset() -- the one clean way out of DFU mode without a console."""
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+    tmp = LOGDIR / f"dfu-download-{alt}"
+    tmp.write_bytes(data)
+    t0 = time.time()
+    args = ["-a", alt, "-D", str(tmp)] + (["-R"] if reset else [])
+    rc, out = dfu(*args)
+    if rc != 0 and not (reset and "Resetting USB" in out):
+        fail(f"dfu-util download of {name} failed:\n{out[-800:]}")
+    say(f"/{name}: {len(data)} bytes in {time.time() - t0:.1f} s")
+
+
+def request_flash_mode():
+    """Ask the running appliance to reboot into U-Boot DFU. Works over the
+    UART or the USB console; the USB console node dies with the reboot."""
+    ser = A.open_serial()
+    node = ser.port
+    try:
+        if not A.lx_login(ser):
+            fail("no shell on the appliance; is it running? (U-Boot prompt: type `reset`)")
+        ser.write(b"usb-flash-mode\n")
+        ser.flush()
+        time.sleep(1.0)
+        try:
+            out = A.drain(ser, 1.0)
+        except Exception:
+            out = ""
+        if "not found" in out:
+            fail("usb-flash-mode is not on this image; flash once over the UART first")
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
+    return node
+
+
+def wait_for_console(node, timeout=90):
+    """After a reset: the UART is always there; a USB console node comes back
+    with the idle console (~2 s after usb-proxy starts) or the proxied device."""
+    if "usbmodem" not in node:
+        return node
+    end = time.time() + timeout
+    while time.time() < end:
+        nodes = A.console_nodes()
+        if nodes:
+            time.sleep(1.0)
+            return nodes[0]
+        time.sleep(0.5)
+    return None
+
+
+def cmd_flash_usb(args):
+    files = {}
+    for fat, dep in FAT_FILES.items():
+        p = kernel_file(None) if fat == "uImage" else deploy_path(dep)
+        files[fat] = p.read_bytes()
+    uboot = deploy_path(UBOOT_FILE).read_bytes()
+    expect_info, expect_md5 = build_identity()
+    if subprocess.run(["which", "dfu-util"], capture_output=True).returncode != 0:
+        fail("dfu-util not found: brew install dfu-util")
+
+    if dfu_present():
+        say("board is already in DFU mode")
+        node = A.serial_node()
+    else:
+        node = request_flash_mode()
+        say(f"asked the board (via {node}) to reboot into DFU; waiting for {DFU_ID}")
+        if not dfu_wait(60):
+            fail("no DFU device showed up within 60 s. Card without the DFU-capable "
+                 "U-Boot/boot.scr? Flash once over the UART: appliance.py flash --uboot")
+    say("DFU device present")
+
+    # U-Boot first, like the serial path. The raw alt reads back the whole
+    # 1 MiB region; only the file-length prefix is meaningful.
+    want = A.crc32_of(uboot)
+    back = dfu_upload(DFU_UBOOT_ALT, size=DFU_UBOOT_RAW_BYTES)[:len(uboot)]
+    on_card = A.crc32_of(back) if back else None
+    if args.uboot or (on_card != want and args.auto_uboot):
+        say(f"U-Boot differs from the card ({on_card} vs {want}): writing it")
+        dfu_download(DFU_UBOOT_ALT, uboot, UBOOT_FILE)
+        back = dfu_upload(DFU_UBOOT_ALT, size=DFU_UBOOT_RAW_BYTES)[:len(uboot)]
+        if A.crc32_of(back) != want:
+            fail("U-Boot readback does not match what was written; do NOT power off, "
+                 "rerun with --uboot")
+        say("U-Boot verified by readback")
+    elif on_card != want:
+        say(f"note: U-Boot on the card ({on_card}) differs from the deploy dir ({want}); "
+            "pass --uboot to update it")
+    else:
+        say("U-Boot unchanged")
+
+    for fat, data in files.items():
+        want = A.crc32_of(data)
+        back = dfu_upload(fat)
+        crc = A.crc32_of(back) if back else None
+        if len(back) == len(data) and crc == want and not args.force:
+            say(f"/{fat} unchanged ({want})")
+            continue
+        say(f"/{fat}: card has {len(back)} bytes crc {crc}, sending {len(data)} bytes crc {want}")
+        dfu_download(fat, data, fat)
+        back = dfu_upload(fat)
+        if len(back) != len(data) or A.crc32_of(back) != want:
+            fail(f"/{fat} readback mismatch ({len(back)} bytes, crc "
+                 f"{A.crc32_of(back) if back else None}); rerun")
+        say(f"/{fat} verified by readback")
+
+    # Leave DFU: a download with -R (detach + USB reset) is what U-Boot's dfu
+    # loop recognises as "done, reset". boot.scr is 2 KB and already verified
+    # above (or unchanged), so writing it once more is the cheapest vehicle.
+    say("leaving DFU: resetting the board")
+    dfu_download("boot.scr", files["boot.scr"], "boot.scr (reset vehicle)", reset=True)
+
+    c = Check()
+    log = open_log("flash-usb")
+    if "usbmodem" in node:
+        say("USB console in use: no boot log to grade; waiting for the console to return")
+        back_node = wait_for_console(node)
+        if not back_node:
+            c.add(False, "console back after reset", "no /dev/cu.usbmodem* within 90 s")
+            sys.exit(0 if c.report() else 1)
+        os.environ["PI_DEV"] = back_node
+        ser = A.open_serial()
+    else:
+        ser = A.open_serial(timeout=0.05)
+        text = A.watch_boot(ser, timeout=60, log=log)
+        check_boot_text(c, text)
+        time.sleep(2)
+    check_running(c, ser, expect_md5, expect_info, adb=args.adb)
+    ser.close()
+    sys.exit(0 if c.report() else 1)
+
+
+# --------------------------------------------------------------------------- #
 def cmd_soak(args):
     LOGDIR.mkdir(parents=True, exist_ok=True)
     tag = "soak-cold" if args.cold else "soak"
@@ -435,6 +628,8 @@ def main():
     p.set_defaults(fn=cmd_boot_ram)
 
     p = sub.add_parser("flash", help="final image onto the card, then reset and check")
+    p.add_argument("--usb", action="store_true",
+                   help="over the OTG port via U-Boot DFU (dfu-util) instead of the UART")
     p.add_argument("--uboot", action="store_true", help="also write U-Boot/SPL")
     p.add_argument("--auto-uboot", action="store_true", help="write U-Boot when it differs from the card")
     p.add_argument("--force", action="store_true", help="rewrite FAT files even when unchanged")

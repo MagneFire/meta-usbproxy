@@ -12,6 +12,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
            file://config.json \
            file://usb-proxy-run \
            file://power-tune \
+           file://usb-flash-mode \
 "
 # opi branch HEAD (carries the sunxi musb fixes, the NO_DEVICE _exit-on-
 # disconnect fix, drain-before-exit so a `fastboot boot` OKAY still reaches
@@ -26,7 +27,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # itself (100 ms, sysfs only) with a --settle_ms debounce, and stamps its
 # milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8).
 # Bump to advance.
-SRCREV = "1e1c1357a157f30471b5b34d891f6fc7eb1498e1"
+SRCREV = "a19f431c4cfb193321b35d14fa1c2f479172b12d"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
@@ -45,8 +46,8 @@ do_configure() {
 do_compile() {
     ${CXX} ${CXXFLAGS} -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
-        power-policy.cpp \
-        ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp \
+        power-policy.cpp console-acm.cpp console-shell.cpp gadget-idle.cpp \
+        ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp -lutil \
         -o usb-proxy
 }
 
@@ -55,6 +56,7 @@ do_install() {
     install -m 0755 ${S}/usb-proxy        ${D}${bindir}/usb-proxy
     install -m 0755 ${WORKDIR}/usb-proxy-run ${D}${bindir}/usb-proxy-run
     install -m 0755 ${WORKDIR}/power-tune     ${D}${bindir}/power-tune
+    install -m 0755 ${WORKDIR}/usb-flash-mode ${D}${bindir}/usb-flash-mode
 
     install -d ${D}${sysconfdir}/usb-proxy
     install -m 0644 ${WORKDIR}/config.json ${D}${sysconfdir}/usb-proxy/config.json

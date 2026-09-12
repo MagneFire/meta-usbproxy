@@ -1,0 +1,14 @@
+#!/bin/sh
+# Reboot into U-Boot's DFU mode so the SD card can be written over the OTG
+# port (scripts/appliance.py flash --usb on the Mac). Linux has no MMC driver
+# here; U-Boot does the writing. The request travels through the first H3 RTC
+# general-purpose register, which keeps its value across a warm reset (and
+# reads 0 after a cold power-on): usbproxy-boot.cmd checks it, clears it and
+# runs `dfu 0 mmc 0 120`. The rootfs is a RAM cpio, nothing needs syncing.
+set -e
+MAGIC=0x44465531	# "DFU1"
+REG=0x01f00100
+devmem $REG 32 $MAGIC
+[ "$(devmem $REG 32)" = "0x44465531" ] || { echo "usb-flash-mode: RTC register did not take" >&2; exit 1; }
+echo "usb-flash-mode: rebooting into U-Boot DFU (falls back to a normal boot after 120 s without a host)"
+exec reboot -f

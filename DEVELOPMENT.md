@@ -142,6 +142,11 @@ test, not for producing the target binary.
 | `--iso_batch_size <N>` | ISO packets per transfer (1–32, default 8) |
 | `--adb_bulk_diag` | opt-in ADB/file-sync bulk-OUT diagnostic logging |
 | `--musb_out_read_packets <N>` | bulk-OUT packets per gadget read on musb (default 1; >1 needs the kernel requeue-flush fix) |
+| `--usb_console` | add a CDC-ACM console (root shell on a pty) to the gadget, next to the proxied device's interfaces (§7) |
+| `--usb_console_idle` | present a console-only gadget while no device is attached |
+| `--usb_console_idle_delay_ms <N>` | bus must be empty this long before the idle console attaches (default 2000) |
+| `--usb_console_shell <CMD>` | what runs on the console pty (default `/bin/sh -l`) |
+| `--min_off_ms <N>` | gadget stays detached at least this long between the idle console and the proxied device (default 1000) |
 
 The appliance launcher (`usb-proxy-run`) auto-detects the UDC and runs:
 
@@ -154,8 +159,15 @@ usb-proxy --device "$udc" --driver musb-hdrc \
 
 ```json
 { "reset_device_before_proxy": false, "bmaxpacketsize0_must_greater_than_64": true,
-  "adb_bulk_diag": false, "async_bulk_out_in_flight": 16, "musb_out_read_packets": 8 }
+  "adb_bulk_diag": false, "async_bulk_out_in_flight": 16, "musb_out_read_packets": 16,
+  "adb_ack_accel": true, "power_hook": "/usr/bin/power-tune", "power_idle_ms": 5000,
+  "usb_console": true, "usb_console_idle": true, "usb_console_idle_delay_ms": 2000,
+  "min_off_ms": 1000 }
 ```
+
+The `usb_console*` keys mirror the flags above and are the appliance's choice;
+the usb-proxy repo's own `config.json` leaves them out (off), because the
+console changes what the host sees.
 
 `reset_device_before_proxy` is **false on purpose** — a USB reset causes
 enumeration failures on this device/musb combo (see §8).
@@ -295,6 +307,34 @@ watchdog armed, no oops, login, `/etc/buildinfo` equal to the deploy dir's
 build stamp, usb-proxy md5 equal to the build's, one real proxy running,
 pstore empty, watch in `adb devices`. Transcripts go to `~/.cache/appliance/`.
 
+**Over the OTG port instead of the UART (since 2026-09-12):**
+
+```sh
+brew install dfu-util                              # once
+uv run scripts/appliance.py flash --usb --adb
+```
+
+Same policy (compare, write what differs, verify by readback, reset, `check`),
+different transport: the board is asked to reboot into U-Boot's DFU mode and
+`dfu-util` moves the files at USB speed (the 7 MB uImage in seconds, versus
+136 s over Y-modem). How it gets there without a UART: Linux has no MMC
+driver, so `/usr/bin/usb-flash-mode` writes the magic `DFU1` into the first
+H3 RTC general-purpose register (`0x01f00100`; the RTC domain keeps it across
+a warm reset and clears it on a cold power-on) and runs `reboot -f`;
+`usbproxy-boot.cmd` sees the word, clears it, sets `dfu_alt_info` (the three
+FAT files under their own names plus `u-boot` = raw sectors from `0x10`) and
+runs `dfu 0 mmc 0 120`. The Mac then sees Allwinner `1f3a:1010`; `dfu-util
+-e -R` at the end makes U-Boot reset. The `120` is an inactivity timeout: a
+board that ends up in DFU with no host boots normally two minutes later, so a
+stale flag cannot strand it. The request can be typed over either console
+(`usb-flash-mode` at a root prompt); `appliance.py` uses whichever node
+`applib.serial_node()` finds, and when that is the USB console it has no boot
+log to grade, so `check` starts at the shell. U-Boot options:
+`usbproxy-uboot.cfg` (gadget + `CMD_DFU`/`DFU_MMC`/`DFU_TIMEOUT`, 16 MiB file
+buffer). A card whose U-Boot or boot.scr predate this must be flashed once
+over the UART (`flash --uboot`); the Y-modem path stays for that and for a
+board that does not come up at all.
+
 **RAM-only test of a whole image, card untouched:**
 
 ```sh
@@ -408,6 +448,49 @@ Useful once you're in: `usb-proxy` logs to `/var/volatile/log/usb-proxy.log` (th
 `usb-proxy-run` launcher) — `tail -f` it to watch the proxy. Default verbosity
 prints a line per OUT packet; grep `read 512` / `read 0` to see the bulk-OUT
 pattern.
+
+### The console over the proxy port (no dongle)
+
+Since 2026-09-12 the appliance's gadget also carries a **CDC-ACM console**: a
+root shell on a pty, exposed next to the proxied device's interfaces on the
+same OTG port. On the Mac it is `/dev/cu.usbmodem*`; anything that talks to a
+serial port works (`screen /dev/cu.usbmodem* 115200`), and `scripts/usb-console.py`
+is a small terminal that waits for the node and reconnects when it vanishes.
+The `pi-serial.py` / `appliance.py` scripts use it automatically when no UART
+dongle is present (`applib.serial_node()`; `PI_DEV` still overrides).
+
+How it works (usb-proxy `console-acm.cpp`, `console-shell.cpp`,
+`gadget-idle.cpp`): raw-gadget owns the whole UDC, so the console cannot be a
+configfs/g_serial gadget beside usb-proxy — usb-proxy adds the function itself.
+In composite mode it patches the forwarded descriptors (device class
+`00/00/00` → `EF/02/01`, `bNumInterfaces += 2`, `wTotalLength += 66`, the IAD +
+CDC block appended), answers ep0 requests aimed at its two interfaces and three
+endpoints locally, and enables the endpoints on SET_CONFIGURATION. The
+endpoints come from the tail of the UDC pool (musb: ep4in/ep5in/ep5out), so the
+proxied device keeps ep1..; if a device needs them all, the console gives way
+and a log line says so. While no device is attached the same function rides a
+console-only gadget (`1d6b:0104`, serial `USBPROXY01`, so the node name is
+stable) that attaches after the bus has been empty `usb_console_idle_delay_ms`
+(2 s — above the watch's transient enumerations on a cradle attach) and
+detaches the instant a device appears; `min_off_ms` keeps D+ released ≥ 1 s
+before the composite attaches, overlapping the settle/open time.
+
+What differs from the UART, by design:
+
+- The console **exists only while the gadget does**: it drops for the 10–25 s
+  of an adb↔fastboot transition and comes back with the next enumeration
+  (under the proxied device's serial, or the idle gadget's).
+- **One shell per usb-proxy instance**: a reconnect after a transition lands
+  in a fresh prompt; a `tail -f` does not survive. The shell is a child of
+  usb-proxy (`PR_SET_PDEATHSIG`), so a proxy `_exit` takes it along.
+- Output is **dropped while the Mac has the port closed** (DTR low), so a
+  closed port never stalls the shell. Open the port first, then look.
+- **U-Boot is not behind it.** `boot-ram`, `flash` (serial) and `--catch`
+  need the UART; `flash --usb` is the console-only deploy route.
+- It **changes the device the Mac sees** (two extra interfaces, device class
+  EF/02/01). adb and fastboot match by interface class and are unaffected; a
+  host that keys on the exact configuration would notice. `usb_console:
+  false` in config.json restores the byte-exact mirror.
 
 ### The fastboot test topology
 

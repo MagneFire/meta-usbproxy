@@ -32,21 +32,41 @@ SOH, STX, EOT, ACK, NAK, CAN, CRC = 0x01, 0x02, 0x04, 0x06, 0x15, 0x18, 0x43
 # --------------------------------------------------------------------------- #
 # Port
 # --------------------------------------------------------------------------- #
+def console_nodes():
+    """The appliance's USB console(s): the CDC-ACM function usb-proxy adds to
+    the gadget (composite mode, named after the proxied device's serial) or
+    the idle console-only gadget (serial USBPROXY01). Both are /dev/cu.usbmodem*
+    on macOS; anything else with that prefix is not ours, so PI_DEV settles it."""
+    return sorted(glob.glob("/dev/cu.usbmodem*"))
+
+
 def serial_node():
-    """The dongle's device node. PI_DEV overrides; otherwise the single
-    /dev/tty.usbserial-* present. The node name changes between dongles and
-    reconnects (-10, -110, -11410 have all been seen), which is why there is no
-    hard-coded default any more."""
+    """Which node to talk to. PI_DEV overrides; otherwise the single
+    /dev/tty.usbserial-* (UART dongle) if there is one, else the single
+    /dev/cu.usbmodem* (the USB console over the proxy port). The UART wins when
+    both are present: it is the only channel that survives a proxy restart or
+    a reboot, and the U-Boot side (ub_*) exists only there."""
     dev = os.environ.get("PI_DEV")
     if dev:
         return dev
     nodes = sorted(glob.glob("/dev/tty.usbserial-*"))
     if len(nodes) == 1:
         return nodes[0]
-    if not nodes:
-        sys.exit("no /dev/tty.usbserial-* present: plug in the USB-UART dongle, "
-                 "or set PI_DEV")
-    sys.exit("several USB-UART nodes present, set PI_DEV to one of: " + " ".join(nodes))
+    if len(nodes) > 1:
+        sys.exit("several USB-UART nodes present, set PI_DEV to one of: " + " ".join(nodes))
+    acm = console_nodes()
+    if len(acm) == 1:
+        return acm[0]
+    if acm:
+        sys.exit("several USB consoles present, set PI_DEV to one of: " + " ".join(acm))
+    sys.exit("no /dev/tty.usbserial-* (UART dongle) and no /dev/cu.usbmodem* (USB "
+             "console) present; plug one in, or set PI_DEV")
+
+
+def node_is_usb_console(node=None):
+    """True for the USB console over the proxy port (no U-Boot behind it)."""
+    node = node or serial_node()
+    return "usbmodem" in node
 
 
 def open_serial(timeout=0.05):
