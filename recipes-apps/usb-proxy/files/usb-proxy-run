@@ -86,11 +86,12 @@ fi
 
 cd "$CONF_DIR" || exit 1
 # usb-proxy spawns the USB console's shell (`/bin/sh -l`) from this
-# environment. /etc/profile only adds the sbin dirs to PATH for HOME=/root,
-# and init gives us HOME=/, so without this the console lacks devmem,
-# reboot, ifconfig and friends (usb-flash-mode failed with "devmem: not
-# found" over the console while working over the UART getty).
-export HOME=/root USER=root
+# environment. /etc/profile only adds the sbin dirs to PATH when HOME is
+# root's home, which is /home/root on this image (not /root, which init
+# hands us), so without this the console lacks devmem, reboot, ifconfig and
+# friends (usb-flash-mode failed with "devmem: not found" over the console
+# while working over the UART getty).
+export HOME=/home/root USER=root
 : > "$STARTED_STAMP"
 rm -f "$DETACH_STAMP"
 say "exec usb-proxy on UDC $udc (settle ${settle} ms)"
