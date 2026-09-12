@@ -25,9 +25,12 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # vanishes mid-enumeration can no longer leave a stuck proxy needing a
 # replug; and the in-process device wait: the proxy polls for a device
 # itself (100 ms, sysfs only) with a --settle_ms debounce, and stamps its
-# milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8).
+# milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8); the
+# CDC-ACM console; and the persistent gadget (one fixed gadget, the
+# device's adb/fastboot bulk endpoints bridged onto it, no host
+# re-enumeration on device changes -- DEVELOPMENT.md 7).
 # Bump to advance.
-SRCREV = "a19f431c4cfb193321b35d14fa1c2f479172b12d"
+SRCREV = "6ea542f02c3f1875f301dc6c68fe4085d5a2f0cb"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
@@ -47,6 +50,7 @@ do_compile() {
     ${CXX} ${CXXFLAGS} -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
         power-policy.cpp console-acm.cpp console-shell.cpp gadget-idle.cpp \
+        gadget-fixed.cpp bridge.cpp \
         ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp -lutil \
         -o usb-proxy
 }

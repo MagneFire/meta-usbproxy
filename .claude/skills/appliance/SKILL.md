@@ -55,8 +55,12 @@ as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
   Without a dongle the scripts fall back to the USB console
   (`/dev/cu.usbmodem*`, the CDC-ACM function on the proxy port): shell-level
   things work there (`check`, `swap`, `flash --usb`), U-Boot-level things
-  (`boot-ram`, serial `flash`, `--reboot` grading) do not. The USB console
-  drops during adb↔fastboot transitions; `scripts/usb-console.py` reconnects.
+  (`boot-ram`, serial `flash`, `--reboot` grading) do not. With the
+  persistent gadget (`persistent_gadget: true`, the appliance default since
+  2026-09-12) the node is always `/dev/cu.usbmodemUSBPROXY011` and survives
+  adb↔fastboot transitions; `adb devices`/`fastboot devices` then show the
+  fixed serial `USBPROXY01`, not the watch's. Only a proxy respawn
+  (`swap`, `kill -9`) re-enumerates it.
 - **Kernel file = `uImage-initramfs-*.bin`.** The plain `uImage-*.bin` hangs at
   "Starting kernel" and needs a power-cycle; the scripts refuse it.
 - **Restart the proxy with `kill -9`**, never SIGTERM (graceful path hangs on

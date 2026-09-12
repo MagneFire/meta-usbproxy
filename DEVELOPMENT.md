@@ -147,6 +147,8 @@ test, not for producing the target binary.
 | `--usb_console_idle_delay_ms <N>` | bus must be empty this long before the idle console attaches (default 2000) |
 | `--usb_console_shell <CMD>` | what runs on the console pty (default `/bin/sh -l`) |
 | `--min_off_ms <N>` | gadget stays detached at least this long between the idle console and the proxied device (default 1000) |
+| `--persistent_gadget` | one fixed gadget for the life of the process (console + adb + fastboot interfaces, usb-proxy's own identity); the proxied device's bulk endpoints are bridged onto it, the host is never re-enumerated (§7) |
+| `--gadget_vendor_id <HEX>` / `--gadget_product_id <HEX>` / `--gadget_serial <STR>` | the fixed gadget's identity (default `1d6b:0104`, `USBPROXY01`) |
 
 The appliance launcher (`usb-proxy-run`) auto-detects the UDC and runs:
 
@@ -162,7 +164,7 @@ usb-proxy --device "$udc" --driver musb-hdrc \
   "adb_bulk_diag": false, "async_bulk_out_in_flight": 16, "musb_out_read_packets": 16,
   "adb_ack_accel": true, "power_hook": "/usr/bin/power-tune", "power_idle_ms": 5000,
   "usb_console": true, "usb_console_idle": true, "usb_console_idle_delay_ms": 2000,
-  "min_off_ms": 1000 }
+  "min_off_ms": 1000, "persistent_gadget": true }
 ```
 
 The `usb_console*` keys mirror the flags above and are the appliance's choice;
@@ -484,22 +486,55 @@ stable) that attaches after the bus has been empty `usb_console_idle_delay_ms`
 detaches the instant a device appears; `min_off_ms` keeps D+ released ≥ 1 s
 before the composite attaches, overlapping the settle/open time.
 
+**Persistent gadget (the appliance's mode since 2026-09-12,
+`persistent_gadget: true`).** The paragraph above describes the transparent
+mode, where the gadget is rebuilt from the watch's descriptors and therefore
+re-enumerates on every plug, unplug and adb↔fastboot switch, taking the console
+with it. The appliance instead presents **one fixed gadget for the life of the
+process** (usb-proxy `gadget-fixed.cpp`, `bridge.cpp`): identity `1d6b:0104`,
+serial `USBPROXY01`, one configuration = the CDC-ACM console (interfaces 0/1)
++ an adb interface (`ff/42/01`, iface 2) + a fastboot interface (`ff/42/03`,
+iface 3). ep0 is answered locally; the watch is enumerated only on the board's
+USB-A side, and its adb or fastboot bulk endpoints are **bridged** onto the
+matching fixed interface while it is present (`bridge: adb slot bound` in the
+log). Consequences:
+
+- The Mac enumerates the gadget **once per proxy start** (the ioreg
+  `sessionID` never changes); the console node is always
+  `/dev/cu.usbmodemUSBPROXY011` and a `screen` on it survives every watch
+  transition, including adb↔fastboot (verified: `uptime` every 5 s across
+  `fastboot reboot` → adb, no gap).
+- `adb devices` / `fastboot devices` show the **fixed serial `USBPROXY01`**,
+  not the watch's. Both devices are always listed; the one whose slot has no
+  device bound is **halted**, so `fastboot getvar` fails at once while the
+  watch is in adb, and adb shows `offline`/nothing until the watch binds
+  (the halt is what makes the Mac's adb re-open its transport and send a fresh
+  CNXN; a plain NAK would leave it stale forever, since only the host sends
+  CNXN).
+- A device without an adb/fastboot interface is **ignored** while it is on
+  the bus (log: `does not fit the adb/fastboot template`). The Moto 360
+  presents such a device — `18d1:0afe`, one mass-storage interface
+  `08/06/50` — in some of its modes; the gadget stays up and the manager binds
+  the adb instance that follows. The transparent mirror is only used when the
+  fixed gadget cannot attach at all.
+- Only the watch's adb/fastboot/TWRP-adb bulk traffic is carried; MTP, audio
+  and any control traffic of the proxied device are not (they are not needed
+  for adb/fastboot, which are pure bulk after enumeration).
+- The proxy no longer exits when the watch leaves; it exits only on a fatal
+  gadget error (then inittab respawns it, the one re-enumeration left).
+
 What differs from the UART, by design:
 
-- The console **exists only while the gadget does**: it drops for the 10–25 s
-  of an adb↔fastboot transition and comes back with the next enumeration
-  (under the proxied device's serial, or the idle gadget's).
-- **One shell per usb-proxy instance**: a reconnect after a transition lands
-  in a fresh prompt; a `tail -f` does not survive. The shell is a child of
-  usb-proxy (`PR_SET_PDEATHSIG`), so a proxy `_exit` takes it along.
 - Output is **dropped while the Mac has the port closed** (DTR low), so a
   closed port never stalls the shell. Open the port first, then look.
 - **U-Boot is not behind it.** `boot-ram`, `flash` (serial) and `--catch`
   need the UART; `flash --usb` is the console-only deploy route.
-- It **changes the device the Mac sees** (two extra interfaces, device class
-  EF/02/01). adb and fastboot match by interface class and are unaffected; a
-  host that keys on the exact configuration would notice. `usb_console:
-  false` in config.json restores the byte-exact mirror.
+- With `persistent_gadget: false` (transparent mode) the console **exists
+  only while the gadget does**: it drops for the 10–25 s of an adb↔fastboot
+  transition and comes back under the proxied device's serial (or the idle
+  gadget's), with a fresh shell; and the console **changes the device the Mac
+  sees** (two extra interfaces, device class EF/02/01). `usb_console: false`
+  restores the byte-exact mirror.
 
 ### The fastboot test topology
 

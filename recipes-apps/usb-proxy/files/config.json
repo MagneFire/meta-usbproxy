@@ -10,5 +10,6 @@
     "usb_console": true,
     "usb_console_idle": true,
     "usb_console_idle_delay_ms": 2000,
-    "min_off_ms": 1000
+    "min_off_ms": 1000,
+    "persistent_gadget": true
 }
