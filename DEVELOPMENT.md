@@ -307,12 +307,21 @@ watchdog armed, no oops, login, `/etc/buildinfo` equal to the deploy dir's
 build stamp, usb-proxy md5 equal to the build's, one real proxy running,
 pstore empty, watch in `adb devices`. Transcripts go to `~/.cache/appliance/`.
 
-**Over the OTG port instead of the UART (since 2026-09-12):**
+**Over the OTG port instead of the UART (wired up 2026-09-12, NOT working yet):**
 
 ```sh
 brew install dfu-util                              # once
 uv run scripts/appliance.py flash --usb --adb
 ```
+
+> STATUS: the whole path is implemented and the trigger works (the RTC flag
+> survives a warm reset and `usbproxy-boot.cmd` runs `dfu 0 mmc 0`), but the
+> U-Boot musb **gadget does not enumerate** on this H3 board: `dfu` prints
+> `Controller uninitialized` / `g_dnl_register: failed!, error: -6` and no
+> `1f3a:1010` appears on the Mac. The DM gadget controller is never probed on
+> the OTG port (the U-Boot analog of kernel patch 0002 forcing musb peripheral,
+> and/or PHY0 being shared with ehci0/ohci0). Needs U-Boot-side work before
+> `flash --usb` is usable; keep using the UART `flash` meanwhile.
 
 Same policy (compare, write what differs, verify by readback, reset, `check`),
 different transport: the board is asked to reboot into U-Boot's DFU mode and

@@ -1,6 +1,6 @@
 ---
 name: appliance
-description: Deploy to and verify the Orange Pi usb-proxy appliance — RAM-only binary swap, RAM-only whole-image boot, or flashing the card over the serial console or over USB (U-Boot DFU) — and the checks that prove it took. Use whenever a change must reach the board, when "did the flash work?", or when the board looks wrong after a deploy.
+description: Deploy to and verify the Orange Pi usb-proxy appliance — RAM-only binary swap, RAM-only whole-image boot, or flashing the card over the serial console — and the checks that prove it took. (Flashing over USB/DFU is wired up but NOT working yet: U-Boot's musb gadget does not enumerate.) Use whenever a change must reach the board, when "did the flash work?", or when the board looks wrong after a deploy.
 ---
 
 # Deploying to the appliance
@@ -16,7 +16,7 @@ passing check is not done.
 | usb-proxy source (`/Users/darrel/Downloads/usb-proxy`) | `appliance.py swap` | no (RAM rootfs) | ~2 min |
 | kernel, DT, initramfs contents, launcher, config.json, inittab | `appliance.py boot-ram` | no (card untouched) | ~3 min (750000 baud), ~12 min if U-Boot lacks the baud option |
 | the release: anything, for keeps | `appliance.py flash --adb` | yes | as above + reset |
-| the release, no UART dongle | `appliance.py flash --usb --adb` | yes | seconds (U-Boot DFU over the OTG port; needs `dfu-util` and a card that already has the DFU U-Boot/boot.scr) |
+| ~~the release, no UART dongle~~ | ~~`appliance.py flash --usb --adb`~~ | — | NOT WORKING YET: the U-Boot DFU gadget does not enumerate on this H3 board (`g_dnl_register` -ENXIO, "Controller uninitialized"); use the UART `flash` until the U-Boot musb-peripheral side is fixed |
 | U-Boot / SPL (DRAM clock, WDT, this fragment) | `appliance.py flash --uboot` | yes | + ~1 min |
 
 `swap` builds the devtool workspace (`devtool modify --no-extract usb-proxy
@@ -54,7 +54,7 @@ as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
 - **Only one USB-UART dongle**, or set `PI_DEV`; the node name changes.
   Without a dongle the scripts fall back to the USB console
   (`/dev/cu.usbmodem*`, the CDC-ACM function on the proxy port): shell-level
-  things work there (`check`, `swap`, `flash --usb`), U-Boot-level things
+  things work there (`check`, `swap`), U-Boot-level things
   (`boot-ram`, serial `flash`, `--reboot` grading) do not. The USB console
   drops during adb↔fastboot transitions; `scripts/usb-console.py` reconnects.
 - **Kernel file = `uImage-initramfs-*.bin`.** The plain `uImage-*.bin` hangs at
