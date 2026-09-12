@@ -1,0 +1,68 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] sunxi: probe the musb gadget controller from board_usb_init
+
+The sunxi musb OTG controller is a UCLASS_USB_GADGET_GENERIC device that nothing
+probes on the peripheral path. With !DM_USB_GADGET the sunxi musb gadget has no
+DM UDC (usb_add_gadget_udc is #ifndef __UBOOT__), so the DFU/fastboot/UMS flow
+reaches it via udc_device_get_by_index(), which in that config just calls
+board_usb_init(). sunxi provided none, so the weak no-op ran, the musb glue
+never registered its gadget, and dfu/fastboot/ums failed with "Controller
+uninitialized" (g_dnl_register -ENXIO). Add a sunxi board_usb_init() that probes
+the gadget controller so musb_register() runs and the gadget is available; also
+pull in <usb.h> for enum usb_init_type. USB host boot uses the ehci/ohci path
+and is unaffected.
+
+Upstream-Status: Pending
+
+---
+diff --git a/board/sunxi/board.c b/board/sunxi/board.c
+index 8c12c8deade..c31b4d11a70 100644
+--- a/board/sunxi/board.c
++++ b/board/sunxi/board.c
+@@ -19,6 +19,7 @@
+ #include <init.h>
+ #include <log.h>
+ #include <mmc.h>
++#include <usb.h>
+ #include <axp_pmic.h>
+ #include <generic-phy.h>
+ #include <phy-sun4i-usb.h>
+@@ -678,6 +679,38 @@ int g_dnl_board_usb_cable_connected(void)
+ 
+ 	return sun4i_usb_phy_vbus_detect(&phy);
+ }
++
++/*
++ * The musb OTG controller is a UCLASS_USB_GADGET_GENERIC device that nothing
++ * probes on the peripheral path: with !DM_USB_GADGET (the sunxi musb gadget has
++ * no DM UDC -- usb_add_gadget_udc is #ifndef __UBOOT__), udc_device_get_by_index()
++ * (drivers/usb/gadget/udc/udc-uclass.c) just calls board_usb_init(). sunxi
++ * provided none, so the weak no-op ran, the musb glue never registered its
++ * gadget, and dfu/fastboot/ums died with "Controller uninitialized"
++ * (g_dnl_register -ENXIO). Probe the controller here so musb_register() runs and
++ * the gadget is available. USB host boot uses the ehci/ohci path, not this.
++ */
++int board_usb_init(int index, enum usb_init_type init)
++{
++	struct udevice *dev;
++	int ret;
++
++	if (init != USB_INIT_DEVICE)
++		return 0;
++
++	ret = uclass_get_device(UCLASS_USB_GADGET_GENERIC, index, &dev);
++	if (ret) {
++		pr_err("%s: cannot find USB gadget controller: %d\n", __func__, ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++int board_usb_cleanup(int index, enum usb_init_type init)
++{
++	return 0;
++}
+ #endif /* CONFIG_USB_GADGET */
+ 
+ #ifdef CONFIG_SERIAL_TAG

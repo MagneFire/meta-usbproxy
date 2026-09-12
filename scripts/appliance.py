@@ -573,12 +573,15 @@ def cmd_flash_usb(args):
     # Leave DFU: a download with -R (detach + USB reset) is what U-Boot's dfu
     # loop recognises as "done, reset". boot.scr is 2 KB and already verified
     # above (or unchanged), so writing it once more is the cheapest vehicle.
-    say("leaving DFU: resetting the board")
-    dfu_download("boot.scr", files["boot.scr"], "boot.scr (reset vehicle)", reset=True)
-
+    # The DFU reset is issued over USB and the board comes back within a
+    # fraction of a second, so for a UART console the port must be open BEFORE
+    # the reset -- opening it afterwards races the SPL banner and misgrades a
+    # perfectly good boot.
     c = Check()
     log = open_log("flash-usb")
     if "usbmodem" in node:
+        say("leaving DFU: resetting the board")
+        dfu_download("boot.scr", files["boot.scr"], "boot.scr (reset vehicle)", reset=True)
         say("USB console in use: no boot log to grade; waiting for the console to return")
         back_node = wait_for_console(node)
         if not back_node:
@@ -588,6 +591,9 @@ def cmd_flash_usb(args):
         ser = A.open_serial()
     else:
         ser = A.open_serial(timeout=0.05)
+        ser.reset_input_buffer()
+        say("leaving DFU: resetting the board")
+        dfu_download("boot.scr", files["boot.scr"], "boot.scr (reset vehicle)", reset=True)
         text = A.watch_boot(ser, timeout=60, log=log)
         check_boot_text(c, text)
         time.sleep(2)

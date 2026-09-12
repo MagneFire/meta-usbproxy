@@ -12,6 +12,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 # DEVELOPMENT.md section 9.
 SRC_URI:append = " \
     file://0001-sunxi-dw-dram-use-pattern-based-size-detection.patch \
+    file://0002-sunxi-board-usb-init-probe-musb-gadget.patch \
     file://usbproxy-uboot.cfg \
     file://usbproxy-boot.cmd \
 "
