@@ -30,7 +30,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # device's adb/fastboot bulk endpoints bridged onto it, no host
 # re-enumeration on device changes -- DEVELOPMENT.md 7).
 # Bump to advance.
-SRCREV = "6ea542f02c3f1875f301dc6c68fe4085d5a2f0cb"
+SRCREV = "7c3b29a7c8115757d37fee28143101b403d7e890"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"

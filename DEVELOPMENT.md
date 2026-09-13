@@ -505,12 +505,37 @@ log). Consequences:
   transition, including adb↔fastboot (verified: `uptime` every 5 s across
   `fastboot reboot` → adb, no gap).
 - `adb devices` / `fastboot devices` show the **fixed serial `USBPROXY01`**,
-  not the watch's. Both devices are always listed; the one whose slot has no
-  device bound is **halted**, so `fastboot getvar` fails at once while the
-  watch is in adb, and adb shows `offline`/nothing until the watch binds
-  (the halt is what makes the Mac's adb re-open its transport and send a fresh
-  CNXN; a plain NAK would leave it stale forever, since only the host sends
-  CNXN).
+  not the watch's. Both devices are always listed. With no watch, `adb
+  devices` shows a steady `USBPROXY01 offline`: the idle adb slot **NAKs**,
+  the Mac's adb opens it once and its CNXN stays pending. When the watch
+  leaves, its slot is **halted** so the host's stale transfers fail at once
+  and adb drops its transport (only the host sends CNXN, so a transport left
+  alive would never talk to the next adbd); for adb that halt is a 300 ms
+  pulse back to NAK, the fastboot slot stays halted so `fastboot getvar`
+  fails at once while the watch is in adb. Until 2026-09-13 the idle adb slot
+  was halted too, and macOS adb, which forgets a kicked device, re-opened it
+  every second: a ~1 ms `USBPROXY01 offline` blink per second (a 1 Hz poll
+  drifts into it), an interface open/close plus serial-string read per
+  second, and 7 lines/s in adb's server log (84 MB in a day).
+- **The pulse halts only the IN endpoint.** adb's pending read is what
+  kicks it. Halting OUT too made the CNXN of the re-opened transport arrive
+  without its 24-byte header, one cycle in two: musb writes CLRDATATOG on
+  every set/clear halt, so the gadget's OUT toggle went back to DATA0 while
+  the Mac kept its own across the re-open, and a header on the wrong toggle
+  is ACKed as a duplicate and dropped. The headless banner is then dropped by
+  the framer (`286 host bytes where a header was due`) and adb sits
+  `offline` until its server restarts. Never touched, the OUT toggles stay
+  in step (3/3 reboot cycles clean after the change, 1/3 before).
+- **Host data never parks in the UDC while idle.** The idle adb slot runs a
+  **sink thread** (`bridge.cpp` `sink_main`) that reads its bulk OUT into the
+  stream framer: the CNXN is recorded in user space (log: `idle adb slot:
+  host CNXN captured`) and replayed the instant a device binds (`replaying
+  the host's last CNXN`); anything else is dropped. Without it the CNXN sat
+  in the musb RX FIFO for the whole watch reboot, through `power-tune idle`'s
+  bus-clock drop; the first headless-banner loss was seen in exactly that
+  state, and whether the FIFO or the toggle above lost it was not settled.
+  Clearing a halt on musb also flushes that FIFO, which is why
+  `set_halt_locked()` never clears a slot that is not halted.
 - A device without an adb/fastboot interface is **ignored** while it is on
   the bus (log: `does not fit the adb/fastboot template`). The Moto 360
   presents such a device — `18d1:0afe`, one mass-storage interface
