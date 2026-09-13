@@ -140,15 +140,10 @@ test, not for producing the target binary.
 | `--enable_customized_config` | load `config.json` (used by the appliance) |
 | `--auto_remap_endpoints` | remap descriptors/endpoints to UDC limits |
 | `--iso_batch_size <N>` | ISO packets per transfer (1–32, default 8) |
-| `--adb_bulk_diag` | opt-in ADB/file-sync bulk-OUT diagnostic logging |
 | `--musb_out_read_packets <N>` | bulk-OUT packets per gadget read on musb (default 1; >1 needs the kernel requeue-flush fix) |
-| `--usb_console` | add a CDC-ACM console (root shell on a pty) to the gadget, next to the proxied device's interfaces (§7) |
-| `--usb_console_idle` | present a console-only gadget while no device is attached |
-| `--usb_console_idle_delay_ms <N>` | bus must be empty this long before the idle console attaches (default 2000) |
-| `--usb_console_shell <CMD>` | what runs on the console pty (default `/bin/sh -l`) |
-| `--min_off_ms <N>` | gadget stays detached at least this long between the idle console and the proxied device (default 1000) |
-| `--persistent_gadget` | one fixed gadget for the life of the process (console + adb + fastboot interfaces, usb-proxy's own identity); the proxied device's bulk endpoints are bridged onto it, the host is never re-enumerated (§7) |
+| `--persistent_gadget` | one fixed gadget for the life of the process (CDC-ACM console + adb + fastboot interfaces, usb-proxy's own identity); the proxied device's bulk endpoints are bridged onto it, the host is never re-enumerated (§7) |
 | `--gadget_vendor_id <HEX>` / `--gadget_product_id <HEX>` / `--gadget_serial <STR>` | the fixed gadget's identity (default `1d6b:0104`, `USBPROXY01`) |
+| `--usb_console_shell <CMD>` | what runs on the fixed gadget's console pty (default `/bin/sh -l`) |
 
 The appliance launcher (`usb-proxy-run`) auto-detects the UDC and runs:
 
@@ -161,15 +156,14 @@ usb-proxy --device "$udc" --driver musb-hdrc \
 
 ```json
 { "reset_device_before_proxy": false, "bmaxpacketsize0_must_greater_than_64": true,
-  "adb_bulk_diag": false, "async_bulk_out_in_flight": 16, "musb_out_read_packets": 16,
+  "async_bulk_out_in_flight": 16, "musb_out_read_packets": 16,
   "adb_ack_accel": true, "power_hook": "/usr/bin/power-tune", "power_idle_ms": 5000,
-  "usb_console": true, "usb_console_idle": true, "usb_console_idle_delay_ms": 2000,
-  "min_off_ms": 1000, "persistent_gadget": true }
+  "persistent_gadget": true }
 ```
 
-The `usb_console*` keys mirror the flags above and are the appliance's choice;
-the usb-proxy repo's own `config.json` leaves them out (off), because the
-console changes what the host sees.
+`persistent_gadget` is the appliance's choice (it brings the USB console with
+it); the usb-proxy repo's own `config.json` leaves it out, so a plain checkout
+behaves like upstream and mirrors the proxied device.
 
 `reset_device_before_proxy` is **false on purpose** — a USB reset causes
 enumeration failures on this device/musb combo (see §8).
@@ -470,28 +464,21 @@ is a small terminal that waits for the node and reconnects when it vanishes.
 The `pi-serial.py` / `appliance.py` scripts use it automatically when no UART
 dongle is present (`applib.serial_node()`; `PI_DEV` still overrides).
 
-How it works (usb-proxy `console-acm.cpp`, `console-shell.cpp`,
-`gadget-idle.cpp`): raw-gadget owns the whole UDC, so the console cannot be a
-configfs/g_serial gadget beside usb-proxy — usb-proxy adds the function itself.
-In composite mode it patches the forwarded descriptors (device class
-`00/00/00` → `EF/02/01`, `bNumInterfaces += 2`, `wTotalLength += 66`, the IAD +
-CDC block appended), answers ep0 requests aimed at its two interfaces and three
-endpoints locally, and enables the endpoints on SET_CONFIGURATION. The
-endpoints come from the tail of the UDC pool (musb: ep4in/ep5in/ep5out), so the
-proxied device keeps ep1..; if a device needs them all, the console gives way
-and a log line says so. While no device is attached the same function rides a
-console-only gadget (`1d6b:0104`, serial `USBPROXY01`, so the node name is
-stable) that attaches after the bus has been empty `usb_console_idle_delay_ms`
-(2 s — above the watch's transient enumerations on a cradle attach) and
-detaches the instant a device appears; `min_off_ms` keeps D+ released ≥ 1 s
-before the composite attaches, overlapping the settle/open time.
+How it works (usb-proxy `console-acm.cpp`, `console-shell.cpp`): raw-gadget
+owns the whole UDC, so the console cannot be a configfs/g_serial gadget beside
+usb-proxy — usb-proxy adds the CDC-ACM function itself, as part of the
+persistent gadget below. Its endpoints come from the tail of the UDC pool
+(musb: ep4in/ep5in/ep5out) so the bridge interfaces keep ep1..; if they did
+not fit, the console would give way and a log line say so. (Until 2026-09-13
+the function could also be spliced into the transparent mode's mirrored
+gadget, and rode a console-only idle gadget while no device was attached;
+both paths were removed when the persistent gadget became the only console.)
 
 **Persistent gadget (the appliance's mode since 2026-09-12,
-`persistent_gadget: true`).** The paragraph above describes the transparent
-mode, where the gadget is rebuilt from the watch's descriptors and therefore
-re-enumerates on every plug, unplug and adb↔fastboot switch, taking the console
-with it. The appliance instead presents **one fixed gadget for the life of the
-process** (usb-proxy `gadget-fixed.cpp`, `bridge.cpp`): identity `1d6b:0104`,
+`persistent_gadget: true`).** The transparent mode rebuilds the gadget from
+the watch's descriptors and therefore re-enumerates on every plug, unplug and
+adb↔fastboot switch, and has no console. The appliance instead presents **one
+fixed gadget for the life of the process** (usb-proxy `gadget-fixed.cpp`, `bridge.cpp`): identity `1d6b:0104`,
 serial `USBPROXY01`, one configuration = the CDC-ACM console (interfaces 0/1)
 + an adb interface (`ff/42/01`, iface 2) + a fastboot interface (`ff/42/03`,
 iface 3). ep0 is answered locally; the watch is enumerated only on the board's
@@ -554,12 +541,9 @@ What differs from the UART, by design:
   closed port never stalls the shell. Open the port first, then look.
 - **U-Boot is not behind it.** `boot-ram`, `flash` (serial) and `--catch`
   need the UART; `flash --usb` is the console-only deploy route.
-- With `persistent_gadget: false` (transparent mode) the console **exists
-  only while the gadget does**: it drops for the 10–25 s of an adb↔fastboot
-  transition and comes back under the proxied device's serial (or the idle
-  gadget's), with a fresh shell; and the console **changes the device the Mac
-  sees** (two extra interfaces, device class EF/02/01). `usb_console: false`
-  restores the byte-exact mirror.
+- With `persistent_gadget: false` (transparent mode) there is **no USB
+  console at all**: the Mac sees the byte-exact mirror of the proxied device,
+  and only the UART is left for a shell.
 
 ### The fastboot test topology
 
@@ -763,7 +747,8 @@ packet (delivered as a phantom ZLP), deadlocking length-framed streams. Kernel
 patch `0001` (v2) removes the flush entirely. Verified: repeated 10–50 MB
 pushes complete md5-exact at ~1.2 MB/s. **See
 [`MUSB-BULK-OUT.md`](MUSB-BULK-OUT.md)** for the investigation record, the
-evidence, and the diagnostic tooling (`adb_bulk_diag`) that found it.
+evidence, and the diagnostic tooling (`adb_bulk_diag`, since removed from
+usb-proxy) that found it.
 
 ---
 

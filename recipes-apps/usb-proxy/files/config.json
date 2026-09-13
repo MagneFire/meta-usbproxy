@@ -1,15 +1,10 @@
 {
     "reset_device_before_proxy": false,
     "bmaxpacketsize0_must_greater_than_64": true,
-    "adb_bulk_diag": false,
     "async_bulk_out_in_flight": 16,
     "musb_out_read_packets": 16,
     "adb_ack_accel": true,
     "power_hook": "/usr/bin/power-tune",
     "power_idle_ms": 5000,
-    "usb_console": true,
-    "usb_console_idle": true,
-    "usb_console_idle_delay_ms": 2000,
-    "min_off_ms": 1000,
     "persistent_gadget": true
 }

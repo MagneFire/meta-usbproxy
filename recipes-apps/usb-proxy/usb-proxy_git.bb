@@ -14,23 +14,11 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
            file://power-tune \
            file://usb-flash-mode \
 "
-# opi branch HEAD (carries the sunxi musb fixes, the NO_DEVICE _exit-on-
-# disconnect fix, drain-before-exit so a `fastboot boot` OKAY still reaches
-# the host as the device drops off the bus, the condvar/fast-path latency
-# work and the adb_ack_accel throughput feature, plus the idle-power work:
-# the endpoint write loop now sleeps instead of polling at 1kHz, and
-# --power_hook/--power_idle_ms drive power-tune's active/idle modes; and
-# always-exit-on-device-loss: ep0-path NO_DEVICE, a direct-exit hotplug
-# callback and a 1 Hz devtmpfs-node liveness check, so a device that
-# vanishes mid-enumeration can no longer leave a stuck proxy needing a
-# replug; and the in-process device wait: the proxy polls for a device
-# itself (100 ms, sysfs only) with a --settle_ms debounce, and stamps its
-# milestone log lines with the dmesg clock -- see DEVELOPMENT.md 8); the
-# CDC-ACM console; and the persistent gadget (one fixed gadget, the
-# device's adb/fastboot bulk endpoints bridged onto it, no host
-# re-enumeration on device changes -- DEVELOPMENT.md 7).
-# Bump to advance.
-SRCREV = "7c3b29a7c8115757d37fee28143101b403d7e890"
+# opi branch HEAD: the sunxi musb fixes, the adb/fastboot forwarding work
+# (never-drop bulk OUT, async OUT, adb_ack_accel), device-loss handling, the
+# power hook, and the persistent gadget with its CDC-ACM console
+# (DEVELOPMENT.md 7 and 8). Bump to advance.
+SRCREV = "fbc0a46735545977ed265ebe2d70205bc4ed6a28"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
@@ -49,7 +37,7 @@ do_configure() {
 do_compile() {
     ${CXX} ${CXXFLAGS} -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
-        power-policy.cpp console-acm.cpp console-shell.cpp gadget-idle.cpp \
+        power-policy.cpp console-acm.cpp console-shell.cpp gadget-ep0.cpp \
         gadget-fixed.cpp bridge.cpp \
         ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp -lutil \
         -o usb-proxy
