@@ -495,11 +495,10 @@ log). Consequences:
   not the watch's. Both devices are always listed. With no watch, `adb
   devices` shows a steady `USBPROXY01 offline`: the idle adb slot **NAKs**,
   the Mac's adb opens it once and its CNXN stays pending. When the watch
-  leaves, its slot is **halted** so the host's stale transfers fail at once
-  and adb drops its transport (only the host sends CNXN, so a transport left
-  alive would never talk to the next adbd); for adb that halt is a 300 ms
-  pulse back to NAK, the fastboot slot stays halted so `fastboot getvar`
-  fails at once while the watch is in adb. Until 2026-09-13 the idle adb slot
+  leaves the adb slot, the slot gets a 300 ms **halt pulse** so the host's
+  stale read fails at once and adb drops its transport (only the host sends
+  CNXN, so a transport left alive would never talk to the next adbd), then it
+  is back to NAK. Until 2026-09-13 the idle adb slot
   was halted too, and macOS adb, which forgets a kicked device, re-opened it
   every second: a ~1 ms `USBPROXY01 offline` blink per second (a 1 Hz poll
   drifts into it), an interface open/close plus serial-string read per
@@ -513,6 +512,22 @@ log). Consequences:
   the framer (`286 host bytes where a header was due`) and adb sits
   `offline` until its server restarts. Never touched, the OUT toggles stay
   in step (3/3 reboot cycles clean after the change, 1/3 before).
+- **The fastboot slot is never halted by the bridge** (2026-09-22). Until then
+  it was halted while idle and at every unbind ("`fastboot getvar` fails at
+  once while the watch is in adb") and cleared at bind, which is the same
+  toggle trap on both endpoints: a fastboot session normally ends with
+  nothing pending, so the Mac never sees the STALL that would make it reset
+  its toggles, while the gadget's went back to DATA0 twice per mode switch.
+  About one session in two after `adb reboot bootloader` then lost its first
+  command packet (ACKed as a duplicate, nothing logged) or its first reply
+  (discarded by the Mac after a `wrote N bytes to host`) and `fastboot` hung
+  until Ctrl-C. In transparent mode the Mac re-enumerated on every mode
+  switch, so both sides restarted at DATA0 together. Now the idle fastboot
+  slot NAKs; a command typed while the watch is still in adb parks in the
+  musb RX FIFO and is delivered when the watch binds, the transparent-mode
+  "waiting for device" behaviour (on macOS the halted slot never failed fast
+  anyway: fastboot cleared the stall itself and then hung on the NAK). Only
+  the host's own SET_FEATURE halts are cleared at bind.
 - **Host data never parks in the UDC while idle.** The idle adb slot runs a
   **sink thread** (`bridge.cpp` `sink_main`) that reads its bulk OUT into the
   stream framer: the CNXN is recorded in user space (log: `idle adb slot:
