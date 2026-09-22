@@ -539,11 +539,38 @@ log). Consequences:
   Clearing a halt on musb also flushes that FIFO, which is why
   `set_halt_locked()` never clears a slot that is not halted.
 - A device without an adb/fastboot interface is **ignored** while it is on
-  the bus (log: `does not fit the adb/fastboot template`). The Moto 360
-  presents such a device — `18d1:0afe`, one mass-storage interface
-  `08/06/50` — in some of its modes; the gadget stays up and the manager binds
-  the adb instance that follows. The transparent mirror is only used when the
-  fixed gadget cannot attach at all.
+  the bus (log: `does not fit the adb/fastboot template`); the gadget stays up
+  and the manager binds the adb instance that follows. The transparent mirror
+  is only used when the fixed gadget cannot attach at all.
+- **`18d1:0afe`, one mass-storage interface `08/06/50`, is usb-moded's
+  charging-only gadget** (2026-09-22). Every AsteroidOS watch runs usb-moded;
+  its charging mode is function `mass_storage` with no backing file and the
+  product id 0AFE hard-coded in `usb_moded-android.c` ("Jolla Device Charging
+  Only" in the usb.ids). Seen on smelt after `adb reboot` and on narwhal after
+  `fastboot reboot`: the watch comes back in that mode instead of adb and stays
+  there (40+ min observed); `adb devices` shows the steady `USBPROXY01
+  offline` row because nothing is bound. usb-moded picks it when its cable
+  classification (the watch's own charger driver: power_supply type
+  `USB`/`USB_CDP` = PC, `USB_DCP`/`USB_FLOAT` = charger, `Unknown` =
+  disconnected) says charger, during bootup and user-session changes (these
+  self-heal), or when its switch to `adb_mode` fails (this does not). It only
+  re-evaluates on a cable event: **reseat the watch** (which power-cycles the
+  board: RAM-swapped binary and log are lost); a USB-A port power-cycle
+  (`usb1-port1/disable`) re-enumerates the watch in the same mode, and the
+  Zero's USB-A VBUS is hard-wired, so the appliance cannot emulate a reseat.
+  The proxy plays no part in the decision: in the recorded case it only opened
+  the device 1.2 s after it appeared, and the state survived 5 s with nothing
+  holding it. It has never been seen with the watch on a Mac, so the appliance
+  as a host is a factor; the two suspects are VBUS on the USB-A port while the
+  freshly rebooted watch charges at its peak (first sighting was with a low
+  battery), and the Pi kernel's port resets through the ~20 s window in which
+  the booting watch pulls up but does not answer (a reset during BC1.2
+  detection can skew the type). Not yet separated; the plan for it (watch
+  journal `journalctl -u usb-moded`, a powered hub between appliance and
+  cradle, a boot with the proxy frozen by `kill -STOP`) is in
+  `~/.claude/plans/it-seems-that-fastboot-lovely-deer.md`. On the watch,
+  `android_tracking=1` in usb-moded's `[udev]` section would let a host that
+  configures the gadget override a charger verdict.
 - Only the watch's adb/fastboot/TWRP-adb bulk traffic is carried; MTP, audio
   and any control traffic of the proxied device are not (they are not needed
   for adb/fastboot, which are pure bulk after enumeration).

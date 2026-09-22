@@ -70,6 +70,11 @@ as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
   `scripts/mac-usb-unwedge.py` once; run it by hand before any replug.
 - **Replugging the Mac↔Pi cable power-cycles the Pi** and erases the RAM log
   and any swapped binary.
+- **`USBPROXY01 offline` after a watch reboot, with `does not fit the
+  adb/fastboot template` and `18d1:0afe` in the log**: the watch came up in
+  usb-moded's charging-only mode, not a proxy fault (DEVELOPMENT.md §7).
+  Reseat the watch; that power-cycles the board too (swap and log gone). A
+  USB-A port power-cycle does not clear it.
 - **U-Boot stays reachable** even when Linux hangs: `--catch` breaks
   `bootdelay=0`. Only a kernel that never returns to U-Boot (kernel-only
   uImage, hung init) needs a physical power-cycle first.

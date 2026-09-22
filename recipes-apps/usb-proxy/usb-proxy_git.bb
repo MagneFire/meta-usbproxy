@@ -18,7 +18,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # (never-drop bulk OUT, async OUT, adb_ack_accel), device-loss handling, the
 # power hook, and the persistent gadget with its CDC-ACM console
 # (DEVELOPMENT.md 7 and 8). Bump to advance.
-SRCREV = "fbc0a46735545977ed265ebe2d70205bc4ed6a28"
+SRCREV = "2e5dd0b32de6fe8b569bfba123695a85940308be"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
