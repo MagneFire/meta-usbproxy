@@ -538,6 +538,28 @@ log). Consequences:
   state, and whether the FIFO or the toggle above lost it was not settled.
   Clearing a halt on musb also flushes that FIFO, which is why
   `set_halt_locked()` never clears a slot that is not halted.
+- **The halt pulse can kick adb twice, and the framer must survive it**
+  (2026-09-28). macOS adb re-opens a kicked transport whenever its rescan
+  gets to it, 0.1–2.6 s later; if that lands inside the 300 ms pulse the
+  new read stalls again and adb aborts the CNXN it had just started. adb
+  clears the stall host-side only (`ClearPipeStall`, no CLEAR_FEATURE
+  reaches the gadget), so the pulse always runs its full length. When the
+  abort comes after the 24-byte header (`remote usb: 2 - write terminated`
+  in `$TMPDIR/adb.501.log`; `remote usb: 1` means the header never went
+  out), musb has already ACKed that header into the RX FIFO, since nothing
+  reads bulk OUT during the pulse. The sink then read the orphan header
+  first, took the next open's header as banner bytes, and the recorded
+  CNXN had a garbled payload: adbd drops a packet whose `data_check` is
+  wrong without a word, the log showed a replay with no `wrote N bytes to
+  host` after it, and `adb devices` stayed `offline` until the appliance
+  was power-cycled (a fresh enumeration gives one clean CNXN). Seen on
+  catfish on two manual replugs in a row; `adb reboot` cycles happened to
+  re-open later. Since usb-proxy c8c1878 the idle framer restarts at a
+  header that arrives where payload was due (log: `header where N payload
+  bytes were due (host re-opened its transport)`) and a captured CNXN is
+  checksummed before it is recorded (`captured CNXN fails its checksum`,
+  never expected). Recovery on an older build: `adb kill-server; adb
+  start-server`, which sends a fresh CNXN to the bound slot.
 - A device without an adb/fastboot interface is **ignored** while it is on
   the bus (log: `does not fit the adb/fastboot template`); the gadget stays up
   and the manager binds the adb instance that follows. The transparent mirror
