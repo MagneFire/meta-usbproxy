@@ -37,6 +37,10 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    2026-09-09; see DEVELOPMENT.md section 8).
 #  * usbproxy-resilience.cfg: panic_on_oops + 5s panic reboot + pstore/ramoops
 #    (pairs with the 0004 reserved-memory node).
+#  * usbproxy-size.cfg: the size trim for the SPL Falcon boot (every MB of
+#    uImage is ~45 ms of SPL read): H3-only sunxi, no modules, no block
+#    layer, no input/VT, no unused buses, no BPF/cgroups/perf, no extra
+#    crypto or initramfs decoders. Reasons per group in the file.
 #  * 0006-soc-...bus-clock-policy: clock-framework-backed active/idle control
 #    for AHB1/APB1 and MBUS. AHB2 (USB host) and APB2 (UART) stay unchanged.
 #  * 0007-usb-core-skip-config-and-interface-strings: set
@@ -80,4 +84,5 @@ SRC_URI:append = " \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \
+    file://usbproxy-size.cfg \
 "
