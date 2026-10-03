@@ -72,6 +72,15 @@ ephy_leds_off() {
 # The root fix is to stop U-Boot enabling it at all (drop CONFIG_VIDEO from the
 # U-Boot fragment), which would also save it during the boot window; that needs
 # a U-Boot rebuild and a reflash, so it is not done here.
+# The SPL Falcon boot (u-boot patch 0003) writes "FLCN" into the second H3
+# RTC general-purpose register before jumping to the kernel; clearing it here
+# tells the next SPL that this boot reached userspace. A reset that finds it
+# still set (watchdog, panic) boots U-Boot proper and the FAT kernel instead.
+falcon_boot_ok() {
+	command -v devmem >/dev/null 2>&1 || return 0
+	devmem 0x01f00104 32 0
+}
+
 de_off() {
 	command -v devmem >/dev/null 2>&1 || return 0
 	v=$(devmem 0x01c202c4)
@@ -126,6 +135,7 @@ boot)
 
 	ephy_leds_off
 	de_off
+	falcon_boot_ok
 
 	# Boot ends wound up: usb-proxy's monitor thread winds down once it has
 	# seen power_idle_ms of quiet. If usb-proxy is not configured with a

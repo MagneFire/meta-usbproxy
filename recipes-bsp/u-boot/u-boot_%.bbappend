@@ -10,9 +10,14 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 # mem_map and free_initmem() oopsed. Port of upstream's 16-word pattern test
 # (v2025.07, H616-only upstream) to the H3 driver. See usbproxy-uboot.cfg and
 # DEVELOPMENT.md section 9.
+# 0003-sunxi-spl-falcon-boot: SPL Falcon mode. spl_start_uboot() for sunxi
+# (U-Boot proper only on a pending UART byte, the DFU1 RTC flag, or a raw
+# kernel region that is not a Linux image) plus the pre-jump hook that sets
+# CNTFRQ and arms the watchdog. The CONFIG side is in usbproxy-uboot.cfg.
 SRC_URI:append = " \
     file://0001-sunxi-dw-dram-use-pattern-based-size-detection.patch \
     file://0002-sunxi-board-usb-init-probe-musb-gadget.patch \
+    file://0003-sunxi-spl-falcon-boot.patch \
     file://usbproxy-uboot.cfg \
     file://usbproxy-boot.cmd \
 "

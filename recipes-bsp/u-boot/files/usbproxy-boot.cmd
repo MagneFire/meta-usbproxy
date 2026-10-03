@@ -2,6 +2,12 @@
 # u-boot bbappend here rebuilds boot.scr from this file, and scripts/appliance.py
 # flash puts it on the card's FAT partition.
 #
+# Since the SPL Falcon mode (u-boot patch 0003, 2026-10-03) this script is the
+# RECOVERY path, not the normal boot: the SPL boots the kernel from raw sectors
+# and only loads U-Boot proper on a pending UART byte (--catch), on the DFU1
+# flag below, or when the raw kernel region is not a Linux image. What follows
+# is unchanged and still boots the FAT copy of the kernel.
+#
 # Differences from the meta-sunxi default, all for boot time (measured
 # 2026-09-09, see DEVELOPMENT.md section 8):
 #   verify=n        skip the CRC32 of the 6 MB uImage ("Verifying Checksum",
@@ -26,12 +32,15 @@
 # RTC general-purpose register (0x01f00100, survives a warm reset, zero after
 # a cold power-on) and reboots. Clear it first so a failed session boots
 # normally next time instead of looping. dfu_alt_info names what dfu-util may
-# write: the three FAT files, and the raw SPL+U-Boot region at sector 0x10
-# (1 MiB; the FAT partition starts at sector 4096). The trailing number is the
+# write: the three FAT files, the raw SPL+U-Boot region at sector 0x10
+# (1 MiB; the FAT partition starts at sector 4096), and the two raw regions
+# the SPL boots from: "args" (the DTB, 32 KiB at 48 MiB) and "kernel" (the
+# uImage, up to 15 MiB at 49 MiB) -- the same sectors as usbproxy-uboot.cfg's
+# SYS_MMCSD_RAW_MODE_{ARGS,KERNEL}_SECTOR. The trailing number is the
 # inactivity timeout in seconds: no host within it and the boot goes on.
 if itest.l *0x01f00100 == 0x44465531; then
 	mw.l 0x01f00100 0
-	setenv dfu_alt_info "uImage fat 0 1;sun8i-h2-plus-orangepi-zero.dtb fat 0 1;boot.scr fat 0 1;u-boot raw 0x10 0x800"
+	setenv dfu_alt_info "uImage fat 0 1;sun8i-h2-plus-orangepi-zero.dtb fat 0 1;boot.scr fat 0 1;u-boot raw 0x10 0x800;args raw 0x18000 0x40;kernel raw 0x18800 0x7800"
 	echo "usb-proxy: flash request, waiting for dfu-util on the OTG port"
 	dfu 0 mmc 0 120
 fi
