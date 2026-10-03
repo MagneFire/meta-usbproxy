@@ -34,12 +34,19 @@ do_configure() {
     ln -sfn ${STAGING_INCDIR} ${WORKDIR}/jsoncpp-compat/jsoncpp
 }
 
+# Link libstdc++, libgcc and jsoncpp statically with --gc-sections: the
+# binary only uses iostream/fstream/string/vector/map, so it takes the few
+# hundred KB it needs instead of shipping the 1.6 MB libstdc++.so and the
+# 150 KB libjsoncpp.so in the RAM rootfs (the initramfs is read by the SPL
+# on every boot, 2026-10-03 size work). libusb stays shared (no static lib).
 do_compile() {
-    ${CXX} ${CXXFLAGS} -I${WORKDIR}/jsoncpp-compat \
+    ${CXX} ${CXXFLAGS} -ffunction-sections -fdata-sections \
+        -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
         power-policy.cpp console-acm.cpp console-shell.cpp gadget-ep0.cpp \
         gadget-fixed.cpp bridge.cpp \
-        ${LDFLAGS} -lusb-1.0 -pthread -ljsoncpp -lutil \
+        ${LDFLAGS} -Wl,--gc-sections -static-libstdc++ -static-libgcc \
+        -lusb-1.0 -pthread -Wl,-Bstatic -ljsoncpp -Wl,-Bdynamic -lutil \
         -o usb-proxy
 }
 
