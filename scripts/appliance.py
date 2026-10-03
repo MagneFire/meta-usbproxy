@@ -266,6 +266,19 @@ def check_running(c, ser, expect_md5=None, expect_info=None, adb=False):
     out = A.lx_run(ser, "cat /sys/class/udc/*/state 2>/dev/null; tail -n 1 /var/volatile/log/usb-proxy.log")
     c.add(None, "UDC state / last log line", (out or "").replace("\r\n", " | ")[:100])
 
+    # The watch must sit on the EHCI bus (1-1, 480). A chirp missed at boot
+    # used to leave it on the OHCI companion (2-1, 12) at full speed until it
+    # was unplugged: 0.8 MB/s push through the proxy (2026-10-03, kernel
+    # patch 0012 retries the reset). No device at all is reported, not failed.
+    out = A.lx_run(ser, "for d in /sys/bus/usb/devices/[12]-1; do [ -e $d ] && "
+                        "echo $(basename $d) $(cat $d/speed); done")
+    devs = re.findall(r"([12]-1) (\d+)", out or "")
+    if devs:
+        c.add(all(sp == "480" for _, sp in devs), "watch at high speed on EHCI",
+              ", ".join(f"{d} {sp} Mbit/s" for d, sp in devs))
+    else:
+        c.add(None, "watch at high speed on EHCI", "no device on the host port")
+
     if adb:
         c.add(adb_sees_device(), "watch in `adb devices` on the Mac")
 
