@@ -67,6 +67,11 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    bring-up (the same register sequence as U-Boot's H3 psci.c) to get
 #    cpu1 back; U-Boot proper boots still use PSCI. No cpu_die, so cpu1
 #    cannot be offlined any more.
+#  * 0011-dts-...physical-arch-timer: with no firmware writing CNTVOFF, cpu0
+#    and a freshly powered cpu1 disagree on the virtual counter and the
+#    first Falcon boot after a cold start or a DFU session stalled in RCU;
+#    the A23/A33 "arm,cpu-registers-not-fw-configured" property moves the
+#    kernel to the offset-free physical timer (works non-secure too).
 # CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
 DEPENDS += "lz4-native"
 
@@ -81,6 +86,7 @@ SRC_URI:append = " \
     file://0008-dts-orangepi-zero-vdd-cpux-1v3.patch \
     file://0009-dts-orangepi-zero-falcon-memory-chosen.patch \
     file://0010-dts-orangepi-zero-smp-without-psci.patch \
+    file://0011-dts-orangepi-zero-physical-arch-timer.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

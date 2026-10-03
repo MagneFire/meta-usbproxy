@@ -1,0 +1,42 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: use the physical arch timer (no firmware CNTVOFF)
+
+Under the SPL Falcon boot nothing runs U-Boot's non-secure init, so
+CNTVOFF is never written. cpu0 and a freshly powered cpu1 (a cold boot,
+or a cpu1 that PSCI had power-gated during a U-Boot proper boot) then
+disagree on the virtual counter, the clock jumps by thousands of
+seconds between cores, the RCU grace-period kthread never wakes and the
+watchdog resets the board. The ramoops console of such a boot shows
+"clocksource: Switched to clocksource arch_sys_counter" stamped 5409 s
+while the other core is at 0.05 s, then the RCU stall. Warm reboots
+survived only because the previous U-Boot boot had zeroed CNTVOFF on
+both cores and the watchdog reset kept it.
+
+The A23/A33 DT property for firmware that leaves the timer registers
+alone makes the kernel use the physical counter and timer, which have
+no offset, and request both the secure and non-secure physical PPIs,
+so a U-Boot proper (non-secure) boot keeps working too. The rate comes
+from clock-frequency. Applies after 0010.
+
+Upstream-Status: Inappropriate [appliance-specific]
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -308,3 +308,16 @@
+ 		status = "disabled";
+ 	};
+ };
++
++/* usb-proxy appliance: without U-Boot's non-secure init nothing sets
++ * CNTVOFF, so a freshly powered cpu1 (cold boot, or after PSCI power-off
++ * on a U-Boot proper boot) carries a different virtual-counter offset than
++ * cpu0 and the kernel's clock jumps between cores: "clocksource switched"
++ * at 5409 s on one CPU, RCU stall, watchdog reset (the "last Falcon boot
++ * died" fallback, 2026-10-03). This is the A23/A33 property for the same
++ * situation: use the offset-free physical counter and both physical PPIs,
++ * which also works for a U-Boot proper (non-secure) boot. */
++&{/timer} {
++	clock-frequency = <24000000>;
++	arm,cpu-registers-not-fw-configured;
++};
