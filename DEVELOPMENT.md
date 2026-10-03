@@ -933,6 +933,59 @@ the DRAM-droop issue in §8).
   dropped. Check `usbproxy-size.cfg` against `.config`
   after a kernel bump: a `# X is not set` line silently loses to a
   `select`, and the two traps above are exactly that.
+- **Watch stuck at full speed after a cold boot (2026-10-03).** With the
+  watch in the cradle when the board powers up, VBUS and the host's first
+  port reset arrive while the watch is still re-running its gadget setup
+  (`android-gadget-setup`, enable 0 → 1). The chirp goes unanswered, EHCI
+  hands the port to the OHCI companion on that single failure
+  (`check_reset_complete()`, no retry) and the watch enumerates at full speed:
+  `usb 2-1: new full-speed USB device … using ohci-platform` / `not running at
+  top speed; connect to a high speed hub`. It stays there until it is
+  unplugged or reboots itself; a proxy respawn (`swap`) never re-enumerates
+  it. Through the proxy that is 0.8 MB/s push / 0.6 MB/s pull where catfish
+  does 4–8 MB/s at high speed, and it is indistinguishable from a slow proxy
+  until you look at `/sys/bus/usb/devices/*/speed` (`1-1` = EHCI 480, `2-1` =
+  OHCI 12). `appliance.py check` now reports the link speed. EHCI hands a
+  port over on two paths, both one-shot: the reset request releases the port
+  at once when the line state reads low speed (K, which a device still in
+  charger detection can also show), and `check_reset_complete()` releases it
+  when the reset left the port disabled (no chirp answered). The first cold
+  boot with only the second path patched still landed on OHCI with no retry
+  logged, so the watch can take either. Kernel patch 0012 has two stages.
+  Stage 1 resets regardless of the line state (the K-state shortcut is gone),
+  counts the resets that leave the port disabled, reports them as-is so the
+  hub driver's existing `PORT_RESET_TRIES` loop chirps again (200 ms apart),
+  and hands over on the fourth. Alone that was not enough: a cold boot logged
+  four unanswered chirps from 0.70 s to 1.36 s and still landed on OHCI, while
+  clearing `PORT_OWNER` by hand minutes later (`devmem 0x01c1b054 32
+  0x00501000`) got a high-speed enumeration on the first reset, so the watch
+  simply is not ready for longer than the hub driver can wait. Stage 2: after
+  a handoff a delayed work takes the port back from the companion 1 s later
+  (clears `PORT_OWNER`; OHCI sees a disconnect, EHCI a fresh connect) for
+  another round, up to 4 times per 30 s episode; a real full-speed device is
+  re-enumerated those few times and then stays on OHCI. A physical unplug or
+  replug ends the episode and cancels a pending reclaim (the connect change a
+  reclaim produces is marked and told apart from a real one), and because a
+  root hub with nothing attached autosuspends with no delay (the hub driver
+  sets the root hub's autosuspend delay to 0) the work resumes it
+  synchronously with `pm_runtime_get_sync()` and holds it until the owner bit
+  is written (two Codex review rounds 2026-10-03, six findings, all taken).
+  Every step logs
+  (`ehci-platform 1c1b000.usb: port 1 line state low speed before reset N` /
+  `not high speed after reset N` / `handing it to the companion` / `taken
+  back from the companion for another high-speed try (N)` / `stays with the
+  companion after N reclaims`), so dmesg after a cold boot tells the whole
+  story. Validated on a cold boot 2026-10-03: four unanswered chirps to
+  1.15 s, OHCI enumeration at 1.97 s, port taken back at 2.17 s, high speed
+  at 2.53 s; the proxy never saw the full-speed instance and bound the
+  high-speed one at 2.80 s. Re-validated on a cold boot with the final patch:
+  handoff at 1.14 s, taken back at 2.17 s, high speed at 2.52 s, check PASSED.
+  Dropping the OHCI driver instead is not an option: both handoffs are
+  unconditional, so a missed chirp would leave the watch unenumerated. Warm
+  reboots do not reproduce it (VBUS stays up, the watch enumerates at 0.45 s
+  at high speed); only a board power cycle with the watch cradled does, and
+  the OHCI root port's sysfs `disable` does not help (the owner bit stays with
+  the companion).
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes
