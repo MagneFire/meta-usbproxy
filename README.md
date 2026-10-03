@@ -37,8 +37,15 @@ so there's no filesystem to corrupt on power loss.
   before winding the CPU back up on the first packet. AHB2 (the live USB host)
   and APB2 (the recovery UART) are never changed. See DEVELOPMENT.md §10 for
   the measurements and for what is *not* worth optimising.
-- **Fast U-Boot**: `bootdelay=0`, no USB/network boot scan, Ethernet driver
-  dropped — boots straight from the SD card in well under a second.
+- **SPL Falcon boot.** The U-Boot SPL loads the kernel and its DTB from raw
+  SD sectors (48 MiB / 49 MiB, past the FAT) and jumps to Linux itself;
+  U-Boot proper is only loaded on request — a key on the UART, the
+  `usb-flash-mode` DFU flag, a raw region that is not a Linux image, or a
+  previous Falcon boot that never reached userspace (RTC GP1 guard). The
+  kernel DTB carries `/memory` and `/chosen/bootargs` so it needs no
+  U-Boot fixups; the price is no PSCI, so Linux runs on cpu0 only. U-Boot
+  proper keeps `bootdelay=0`, no USB/network boot scan, no Ethernet driver.
+  See DEVELOPMENT.md §6 and §8.
 
 ## Layout
 

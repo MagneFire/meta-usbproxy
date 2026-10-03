@@ -422,6 +422,9 @@ def boot_report(text):
         "dram_mib": dram,
         "dram_ok": dram == "256",
         "wdt_started": bool(re.search(r"WDT:\s+Started", text)),
+        # SPL Falcon mode (u-boot patch 0003): which path the SPL took.
+        "falcon": "SPL: Falcon" in text,
+        "uboot_proper": "SPL: U-Boot" in text or bool(re.search(r"^U-Boot 20\d\d", text, re.M)),
         "oops": bool(re.search(r"Kernel panic|Oops|Rebooting in", text)),
         "login": " login:" in text,
     }
@@ -438,6 +441,18 @@ def boot_report(text):
 READBACK = "0x43000000"
 SPL_SECTOR = 0x10      # sunxi SPL offset (8 KiB); wic: `part u-boot --align 8`
 SECTOR = 512
+
+# SPL Falcon boot regions (u-boot patch 0003, usbproxy-uboot.cfg
+# SYS_MMCSD_RAW_MODE_{ARGS,KERNEL}_SECTOR, wic `part args` / `part kernel`):
+# the SPL boots the kernel from these raw sectors and never reads the FAT.
+# Keyed by the FAT name of the same file, which stays on the card for the
+# U-Boot proper fallback. The windows are 32 KiB and 15 MiB.
+ARGS_SECTOR = 0x18000     # 48 MiB: the DTB (carries /memory + bootargs, kernel patch 0009)
+KERNEL_SECTOR = 0x18800   # 49 MiB: uImage-initramfs
+RAW_REGIONS = {
+    "sun8i-h2-plus-orangepi-zero.dtb": ARGS_SECTOR,
+    "uImage": KERNEL_SECTOR,
+}
 
 # The appliance boot.scr's bootargs (recipes-bsp/u-boot/files/boot.cmd). Kept
 # identical so a RAM boot runs the card's cmdline (the kernel is built with
@@ -462,12 +477,17 @@ def ub_fat_crc(ser, name):
     return size, ub_crc32(ser, READBACK, size)
 
 
-def ub_spl_crc(ser, size):
-    """crc32 of the first `size` bytes at the SPL sector on the card."""
+def ub_raw_crc(ser, sector, size):
+    """crc32 of the first `size` bytes at raw `sector` on the card."""
     blocks = (size + SECTOR - 1) // SECTOR
     ub_send(ser, f"mmc dev 0", 1.5)
-    ub_send(ser, f"mmc read {READBACK} {SPL_SECTOR:x} {blocks:x}", 3.0)
+    ub_send(ser, f"mmc read {READBACK} {sector:x} {blocks:x}", 3.0 + size / 4e6)
     return ub_crc32(ser, READBACK, size)
+
+
+def ub_spl_crc(ser, size):
+    """crc32 of the first `size` bytes at the SPL sector on the card."""
+    return ub_raw_crc(ser, SPL_SECTOR, size)
 
 
 def ub_fat_write(ser, addr, name, data, want, log=print):
@@ -488,20 +508,27 @@ def ub_fat_write(ser, addr, name, data, want, log=print):
     log(f"/{name} written and read back ({want})")
 
 
+def ub_raw_write(ser, addr, sector, data, want, what, log=print):
+    """Write `data` (already at `addr`, crc `want`) to raw `sector` and read
+    it back. Exits on any doubt."""
+    blocks = (len(data) + SECTOR - 1) // SECTOR
+    budget = 3.0 + len(data) / 4e6
+    ub_send(ser, "mmc dev 0", 1.5)
+    out = ub_send(ser, f"mmc write {addr} {sector:x} {blocks:x}", budget)
+    if "OK" not in out and "written" not in out.lower():
+        sys.exit(f"mmc write did not report success — do NOT power cycle; check the console:\n{out}")
+    ub_send(ser, f"mmc read {READBACK} {sector:x} {blocks:x}", budget)
+    got = ub_crc32(ser, READBACK, len(data))
+    if got != want:
+        sys.exit(f"READBACK MISMATCH — the card does not hold {what} (wanted {want}, got {got}). "
+                 "Do NOT power cycle; reflash before resetting.")
+    log(f"{what} written at sector 0x{sector:x} and read back ({want})")
+
+
 def ub_spl_write(ser, addr, data, want, log=print):
     """Write U-Boot (SPL + proper) at sector 0x10 and read it back. The one
     write that can brick the card's boot path, hence the double check."""
-    blocks = (len(data) + SECTOR - 1) // SECTOR
-    ub_send(ser, "mmc dev 0", 1.5)
-    out = ub_send(ser, f"mmc write {addr} {SPL_SECTOR:x} {blocks:x}", 3.0)
-    if "OK" not in out and "written" not in out.lower():
-        sys.exit(f"mmc write did not report success — do NOT power cycle; check the console:\n{out}")
-    ub_send(ser, f"mmc read {READBACK} {SPL_SECTOR:x} {blocks:x}", 3.0)
-    got = ub_crc32(ser, READBACK, len(data))
-    if got != want:
-        sys.exit(f"READBACK MISMATCH — the card does not hold U-Boot (wanted {want}, got {got}). "
-                 "Do NOT power cycle; reflash before resetting.")
-    log(f"U-Boot written at sector 0x{SPL_SECTOR:x} and read back ({want})")
+    ub_raw_write(ser, addr, SPL_SECTOR, data, want, "U-Boot", log=log)
 
 
 def ub_ram_boot(ser, addr, timeout=60, log_file=None):

@@ -303,6 +303,21 @@ watchdog armed, no oops, login, `/etc/buildinfo` equal to the deploy dir's
 build stamp, usb-proxy md5 equal to the build's, one real proxy running,
 pstore empty, watch in `adb devices`. Transcripts go to `~/.cache/appliance/`.
 
+**What is on the card since the SPL Falcon boot (2026-10-03).** The SPL
+boots the kernel itself: it reads the DTB from raw sector `0x18000` (48 MiB,
+32 KiB window) and the bundled-initramfs uImage from `0x18800` (49 MiB,
+15 MiB window), both past the 42 MiB end of the FAT partition and outside
+any partition, and jumps to Linux. The FAT copies of the same files stay for
+U-Boot proper, which the SPL loads only on request (DEVELOPMENT.md §8,
+"Falcon"). `flash` therefore writes the DTB and the uImage twice — once to
+the FAT, once to the raw region — from the same RAM upload (serial) or as
+the DFU alts `args` and `kernel` (USB); `check` grades the boot path from
+Linux (`psci=no` = Falcon). A card without the raw regions still boots: the
+SPL finds no Linux image there and falls through to U-Boot proper and the FAT
+kernel, which is also how the first deploy of this layout went (U-Boot and
+boot.scr over DFU, reboot, then the raw regions through the new boot.scr's
+alts).
+
 **Over the OTG port instead of the UART (works since 2026-09-12):**
 
 ```sh
@@ -798,6 +813,58 @@ the DRAM-droop issue in §8).
   poll. Re-measure with a stamped serial capture of `reboot` (the scratch
   script was a 30-line pyserial loop stamping `U-Boot SPL`, `Starting
   kernel`, `starting pid`) against `$TMPDIR/adb.501.log`.
+- **SPL Falcon boot (2026-10-03): U-Boot proper is skipped.** U-Boot patch
+  `0003-sunxi-spl-falcon-boot.patch` + `CONFIG_SPL_OS_BOOT` in
+  `usbproxy-uboot.cfg`: the SPL reads the DTB and the uImage from raw
+  sectors (§6) and jumps to the kernel. No sunxi board had a
+  `spl_start_uboot()`, so the patch supplies one; U-Boot proper is loaded
+  when a byte is pending on the UART (what `--catch` sends), when the RTC
+  GP0 register holds `usb-flash-mode`'s `DFU1`, when the raw kernel region
+  is not a Linux legacy image (spl_mmc falls through on its own), or when
+  RTC GP1 still holds the `FLCN` word the SPL writes before every Falcon
+  jump — `power-tune boot` clears it once userspace is up, so a Falcon boot
+  that dies (watchdog, panic) gets U-Boot proper and the FAT kernel next
+  time instead of looping. Two things only U-Boot proper used to do are
+  now in `spl_board_prepare_for_linux()`: CNTFRQ for the architected timer
+  and arming the 8 s watchdog (§9). Two things it did are deliberately not
+  replaced: the PSCI monitor and the non-secure switch — the kernel enters
+  in secure SVC with no `/psci` node, so **only cpu0 comes up**; `maxcpus=2`
+  stays in the cmdline but is moot, and power-tune's cpu1 toggles are no-ops
+  (user decision 2026-10-03: measure first, SMP later; options are the
+  kernel's own sun8i-a23 CPUCFG bring-up on H3 or porting U-Boot's PSCI
+  into the SPL if it fits — the SPL has ~5.7 KB left under its 24 KB limit).
+  The kernel DTB is the args blob as-is: DT patch 0009 adds `/memory` (256
+  MiB, which also pins the size whatever the SPL's detection said) and
+  `/chosen/bootargs`; U-Boot proper overwrites both when it does boot.
+  `SPL_FS_FAT` would not fit the SPL, hence raw sectors; `SPL_SPI_SUNXI`
+  had to go (its driver `#error`s under `SPL_OS_BOOT`; no SPI flash here).
+  **Measured gain, first version: ~0.1 s** — A/B on the same card with the
+  USB-console node as the marker (`scripts/boot-ab.py`; gone after `reboot -f` → back once the
+  new kernel's gadget is up): Falcon 1.97–1.99 s, U-Boot proper (forced by
+  writing `FLCN` into GP1 first) 2.07–2.10 s. Why so little: the SPL's own
+  RTC GP2/GP3 stamps (ms since reset, `devmem 0x01f00108` / `0x01f0010c`,
+  shown by `check`) put the SPL's card read of the 7 MB uImage at 0.71 s =
+  9.8 MB/s, against U-Boot proper's 22 MB/s — the SPL ran with the D-cache
+  off, so the sunxi MMC PIO loop stored strongly-ordered. Patch 0003 now
+  turns the D-cache on for the loads (page table at `0x4ff40000`). The first
+  attempt at that hung the SPL and needed the card pulled: U-Boot's
+  `DCACHE_OFF` section option carries the execute-never bit and the SPL
+  runs from SRAM at 0x0. Lessons baked in: section 0 is mapped executable,
+  and on the Falcon path the GP1 word and the watchdog are set *before* the
+  cache enable and the card reads, so any hang resets into the U-Boot
+  proper path. **With the D-cache on the SPL reads the uImage in 0.30 s
+  (23 MB/s) and the same A/B gives Falcon 1.56–1.57 s vs U-Boot proper
+  2.05–2.08 s: 0.5 s saved per boot**, i.e. all of U-Boot proper's share of
+  the §8 budget above. The adb-side number (`reboot -f` → "reported max
+  packet size") cannot show sub-second changes: it is quantised by adb's
+  1 Hz rescan (2.63–2.89 s before and after). What is left to trim is the
+  7 MB uImage itself (every MB is ~45 ms of SPL read plus its share of the
+  LZ4 inflate) and the kernel's own boot. **What the single core costs**
+  (catfish on the appliance, 20 MB random through the bridge, md5-exact,
+  same boot of the same card forced to each path): two cores 6.1 MB/s
+  push and pull, one core 4.9 push / 5.0 pull, i.e. ~20 %. A first run on
+  one core while the watch was busy (load 2.2) gave 0.8 / 0.6 MB/s — treat
+  a single bad number with suspicion and pair the runs.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes
@@ -838,7 +905,7 @@ Three layers now handle this:
 |---|---|---|
 | CPU capped at 816 MHz (1008 OPP deleted) | Removes all rail switching — both remaining OPPs run at one voltage. 1.1 V until 2026-09-09; since then 1.3 V, the rail's power-on state (experiment, patch `0008`, see the decode below). No perf cost: the proxy is USB-RTT-bound and idles at 648 MHz. | kernel patches `0004`, `0008` |
 | `panic_on_oops` + panic timeout | Any oops/panic prints in full, then reboots ~10 s later instead of limping on with corrupt state (oops) or hanging forever (panic). (The Kconfig sets 5 s but meta-sunxi's `boot.scr` passes `panic=10` on the cmdline, which wins — fine.) | `usbproxy-resilience.cfg` |
-| Hardware watchdog, armed from U-Boot | Silent hard hangs anywhere from U-Boot through userspace → hardware reset in ≤8 s. U-Boot arms+feeds it (`CONFIG_WDT` + `CONFIG_WATCHDOG_AUTOSTART` — the latter is default-**off** on sunxi upstream and without it the boot window is unarmed), busybox `watchdog -T 8 -t 2` takes over from inittab. Boot banner must say `WDT: Started watchdog@1c20ca0 ... (8s timeout)`, not `WDT: Not starting`. | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
+| Hardware watchdog, armed from the SPL (Falcon) or U-Boot proper | Silent hard hangs anywhere from the SPL through userspace → hardware reset in ≤8 s. On the normal (Falcon) path the SPL arms it with raw register writes before it reads the card and again before the jump (U-Boot patch 0003); on the recovery path U-Boot proper arms+feeds it (`CONFIG_WDT` + `CONFIG_WATCHDOG_AUTOSTART` — the latter is default-**off** on sunxi upstream and without it the boot window is unarmed, banner `WDT: Started watchdog@1c20ca0 ... (8s timeout)`). The kernel's `sunxi_wdt` keeps it fed (`WATCHDOG_HANDLE_BOOT_ENABLED`) until busybox `watchdog -T 8 -t 2` takes over from inittab; `check` reads `WDT0_MODE` (`devmem 0x01c20cb8`, bit 0) from Linux. A Falcon boot that dies hands the next boot to U-Boot proper (RTC GP1 guard, §8). | `usbproxy-uboot.cfg`, busybox `watchdog.cfg`, inittab bbappend |
 
 **Post-mortem: ramoops/pstore.** The rootfs is RAM, so without persistence a
 self-reboot would erase all evidence. Patch `0004` reserves 128 KiB at

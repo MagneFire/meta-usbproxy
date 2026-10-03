@@ -76,8 +76,17 @@ as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
   Reseat the watch; that power-cycles the board too (swap and log gone). A
   USB-A port power-cycle does not clear it.
 - **U-Boot stays reachable** even when Linux hangs: `--catch` breaks
-  `bootdelay=0`. Only a kernel that never returns to U-Boot (kernel-only
-  uImage, hung init) needs a physical power-cycle first.
+  `bootdelay=0`, and since the SPL Falcon boot (2026-10-03) the same key
+  stream makes the SPL load U-Boot proper instead of the kernel. Only a
+  kernel that never returns to U-Boot (kernel-only uImage, hung init) needs
+  a physical power-cycle first — and a Falcon boot that dies hands the next
+  boot to U-Boot proper on its own (RTC GP1 guard). `check` says which
+  path a boot took (`psci=no` = Falcon); a `U-Boot proper` row on a plain
+  reboot means the raw kernel region is missing or the last Falcon boot
+  died.
+- **The SPL D-cache lesson**: an SPL change that can hang must come after
+  the watchdog arm; U-Boot's `DCACHE_OFF` mapping is execute-never and the
+  SPL runs from SRAM at 0x0 (DEVELOPMENT.md §8).
 - **BusyBox shell**: `head -n 3` not `head -3`; no `base64`; lines over
   1024 chars are silently truncated.
 - **Power measurements**: not with a single meter reading (DEVELOPMENT.md §10).

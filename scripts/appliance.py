@@ -58,6 +58,7 @@ import gzip
 import hashlib
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -87,6 +88,8 @@ INITRAMFS = "usbproxy-initramfs-orange-pi-zero.cpio.gz"
 DFU_ID = "1f3a:1010"
 DFU_UBOOT_ALT = "u-boot"
 DFU_UBOOT_RAW_BYTES = 0x800 * 512
+# The SPL Falcon regions (applib.RAW_REGIONS) as DFU raw alts, by FAT name.
+DFU_RAW_ALTS = {"sun8i-h2-plus-orangepi-zero.dtb": "args", "uImage": "kernel"}
 
 OE = ("export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8; cd ~/yocto/usbproxy && "
       "source layers/poky/oe-init-build-env build >/dev/null && ")
@@ -170,7 +173,16 @@ def check_boot_text(c, text, from_power_on=True):
     if from_power_on:
         c.add(r["dram_ok"], "SPL DRAM banner",
               f"{r['dram_mib']} MiB" if r["dram_mib"] else "no banner seen")
-        c.add(r["wdt_started"], "watchdog armed by U-Boot")
+        # The SPL boots the kernel itself (Falcon, u-boot patch 0003). U-Boot
+        # proper running is the fallback: a key on the UART, the DFU1 flag, or
+        # a raw kernel region that is not a Linux image (not flashed yet?).
+        if r["falcon"]:
+            path = "SPL -> kernel"
+        elif r["uboot_proper"]:
+            path = "U-Boot proper ran (fallback: key/flag, or no raw kernel on the card)"
+        else:
+            path = "neither SPL line seen (old SPL on the card?)"
+        c.add(r["falcon"], "SPL booted the kernel directly", path)
     c.add(not r["oops"], "no oops / panic", r.get("oops_at", ""))
     c.add(r["login"], "reached login prompt")
     return r
@@ -210,6 +222,29 @@ def check_running(c, ser, expect_md5=None, expect_info=None, adb=False):
     out = A.lx_run(ser, "ps w | grep -c '[/]usr/bin/usb-proxy --device'")
     n = int(out.strip()) if out and out.strip().isdigit() else 0
     c.add(n == 1, "one real usb-proxy running", f"{n} instance(s)")
+
+    # Armed by the SPL before the jump (Falcon) or by U-Boot proper
+    # (WATCHDOG_AUTOSTART); either way WDT0_MODE bit 0 must be set by now.
+    out = A.lx_run(ser, "PATH=$PATH:/usr/sbin:/sbin devmem 0x01c20cb8 32")
+    m = re.search(r"0x([0-9A-Fa-f]+)", out or "")
+    mode = int(m.group(1), 16) if m else None
+    c.add(mode is not None and bool(mode & 1), "hardware watchdog armed",
+          f"WDT0_MODE={out.strip() if out else '?'}")
+
+    # Which way this boot came, seen from Linux (useful over the USB console,
+    # which never shows the SPL lines): only U-Boot proper installs PSCI and
+    # adds the /psci node; the Falcon path enters the kernel in secure mode
+    # without it (so cpu1 can never come up; the cpu count alone proves
+    # nothing because power-tune idle offlines cpu1 anyway). GP1 must read 0
+    # once power-tune's boot step ran.
+    out = A.lx_run(ser, "PATH=$PATH:/usr/sbin:/sbin; echo cpus=$(nproc) "
+                        "psci=$([ -d /proc/device-tree/psci ] && echo yes || echo no) "
+                        "gp1=$(devmem 0x01f00104 32) spl_load_ms=$(($(devmem 0x01f00108 32))) "
+                        "spl_jump_ms=$(($(devmem 0x01f0010c 32)))")
+    o = (out or "").strip()
+    path = "Falcon (SPL -> kernel)" if "psci=no" in o else (
+        "U-Boot proper" if "psci=yes" in o else "?")
+    c.add(None if o else False, "boot path seen from Linux", f"{path}: {o}")
 
     out = A.lx_run(ser, "ls /sys/fs/pstore 2>/dev/null | grep -c dmesg-ramoops")
     n = int(out.strip()) if out and out.strip().isdigit() else 0
@@ -399,15 +434,29 @@ def cmd_flash(args):
     else:
         say("U-Boot unchanged")
 
+    # Each file goes to the FAT (U-Boot proper's fallback copy) and, for the
+    # DTB and the kernel, also to the raw region the SPL boots from. One
+    # upload serves both writes; either copy being stale triggers it.
     for fat, data in files.items():
         want = A.crc32_of(data)
         size, crc = A.ub_fat_crc(ser, fat)
-        if size == len(data) and crc == want and not args.force:
-            say(f"/{fat} unchanged ({want})")
+        fat_ok = size == len(data) and crc == want and not args.force
+        sector = A.RAW_REGIONS.get(fat)
+        raw_ok = True
+        if sector is not None:
+            raw_crc = A.ub_raw_crc(ser, sector, len(data))
+            raw_ok = raw_crc == want and not args.force
+        if fat_ok and raw_ok:
+            say(f"/{fat} unchanged ({want})" + (" in FAT and raw region" if sector is not None else ""))
             continue
-        say(f"/{fat}: card has {size} bytes crc {crc}, sending {len(data)} bytes crc {want}")
+        say(f"/{fat}: card has {size} bytes crc {crc}"
+            + (f", raw region crc {raw_crc}" if sector is not None else "")
+            + f"; sending {len(data)} bytes crc {want}")
         A.ub_loady(ser, LOAD_ADDR, data, fat, baud=args.baud or None, progress=say)
-        A.ub_fat_write(ser, LOAD_ADDR, fat, data, want, log=say)
+        if not fat_ok:
+            A.ub_fat_write(ser, LOAD_ADDR, fat, data, want, log=say)
+        if not raw_ok:
+            A.ub_raw_write(ser, LOAD_ADDR, sector, data, want, f"{fat} (SPL raw region)", log=say)
 
     say("resetting")
     text = A.ub_reset_and_watch(ser, log_file=log)
@@ -569,6 +618,22 @@ def cmd_flash_usb(args):
             fail(f"/{fat} readback mismatch ({len(back)} bytes, crc "
                  f"{A.crc32_of(back) if back else None}); rerun")
         say(f"/{fat} verified by readback")
+
+    # The SPL Falcon regions (DTB and kernel in raw sectors). The raw alts
+    # read back the whole window; only the file-length prefix is compared.
+    for fat, alt in DFU_RAW_ALTS.items():
+        data = files[fat]
+        want = A.crc32_of(data)
+        back = dfu_upload(alt, size=len(data))[:len(data)]
+        if len(back) == len(data) and A.crc32_of(back) == want and not args.force:
+            say(f"raw {alt} ({fat}) unchanged ({want})")
+            continue
+        say(f"raw {alt} ({fat}): sending {len(data)} bytes crc {want}")
+        dfu_download(alt, data, f"{alt} (raw, {fat})")
+        back = dfu_upload(alt, size=len(data))[:len(data)]
+        if len(back) != len(data) or A.crc32_of(back) != want:
+            fail(f"raw {alt} readback mismatch; rerun")
+        say(f"raw {alt} verified by readback")
 
     # Leave DFU: a download with -R (detach + USB reset) is what U-Boot's dfu
     # loop recognises as "done, reset". boot.scr is 2 KB and already verified
