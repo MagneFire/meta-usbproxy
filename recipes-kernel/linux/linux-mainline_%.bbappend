@@ -53,6 +53,11 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    its source register was intact), so the rail is under test. Separate
 #    from 0004 so it can be dropped alone if it changes nothing. See
 #    DEVELOPMENT.md section 9.
+#  * 0009-dts-...falcon-memory-chosen: make the DTB usable as-is as the SPL
+#    Falcon args blob (u-boot patch 0003): add the /memory node and the
+#    /chosen/bootargs that U-Boot proper used to add at bootm time. When
+#    U-Boot proper does boot (recovery, boot-ram) it overwrites both, so the
+#    fallback path is unchanged.
 # CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
 DEPENDS += "lz4-native"
 
@@ -65,6 +70,7 @@ SRC_URI:append = " \
     file://0006-soc-sunxi-add-usbproxy-bus-clock-policy.patch \
     file://0007-usb-core-skip-config-and-interface-strings.patch \
     file://0008-dts-orangepi-zero-vdd-cpux-1v3.patch \
+    file://0009-dts-orangepi-zero-falcon-memory-chosen.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

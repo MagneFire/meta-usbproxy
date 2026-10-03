@@ -1,0 +1,39 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: carry /memory and bootargs for the SPL Falcon boot
+
+The appliance's SPL now boots the kernel directly (U-Boot patch 0003,
+CONFIG_SPL_OS_BOOT) and hands it this DTB, read verbatim from raw SD
+sectors. Two things U-Boot proper used to add to the DT at bootm time
+therefore have to be in the source: the memory node (256 MiB at
+0x40000000, which also pins the size regardless of what the SPL's
+auto-detection reported) and the kernel command line, the same one
+usbproxy-boot.cmd builds. CMDLINE_EXTEND still appends " loglevel=3".
+
+When U-Boot proper does boot (recovery path, boot-ram) its memory-bank
+fixup and the bootargs environment variable overwrite both, so nothing
+changes there. Applies after 0008.
+
+Upstream-Status: Inappropriate [appliance-specific]
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -63,6 +63,18 @@
+ 
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
++		/* usb-proxy appliance: the SPL Falcon boot passes this DTB as
++		 * is, so the command line lives here. U-Boot proper (recovery
++		 * boots) overwrites it from its bootargs variable. */
++		bootargs = "console=ttyS0,115200 maxcpus=2 panic=10";
++	};
++
++	/* usb-proxy appliance: U-Boot proper used to add this node from the
++	 * SPL's DRAM detection. The SPL Falcon boot does not, and 256 MiB is
++	 * what this board has. */
++	memory@40000000 {
++		device_type = "memory";
++		reg = <0x40000000 0x10000000>;
+ 	};
+ 
+ 	/* usb-proxy appliance: persistent crash log (ramoops/pstore). The
