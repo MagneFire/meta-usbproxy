@@ -3,3 +3,11 @@
 # so there is NO rootfs partition — nothing on the card is written at runtime.
 part u-boot --source rawcopy --sourceparams="file=${SPL_BINARY}" --ondisk mmcblk0 --no-table --align 8
 part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 2048 --fixed-size ${SUNXI_BOOT_SPACE}
+# SPL Falcon boot regions (u-boot patch 0003 + usbproxy-uboot.cfg): the SPL
+# reads the DTB ("args", 32 KiB window at 48 MiB = sector 0x18000) and the
+# bundled-initramfs uImage ("kernel", 15 MiB window at 49 MiB = sector
+# 0x18800) straight from these raw sectors, outside any partition, and jumps
+# to Linux without U-Boot proper. --offset is in KiB. The FAT copies above
+# stay for the U-Boot proper fallback and for boot-ram.
+part args --source rawcopy --sourceparams="file=sun8i-h2-plus-orangepi-zero.dtb" --ondisk mmcblk0 --no-table --offset 49152
+part kernel --source rawcopy --sourceparams="file=uImage-initramfs-${MACHINE}.bin" --ondisk mmcblk0 --no-table --offset 50176
