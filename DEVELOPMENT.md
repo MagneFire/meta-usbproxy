@@ -899,7 +899,10 @@ the DRAM-droop issue in §8).
   libnss_compat/libBrokenLocale — initramfs 4.44 → 2.85 MB uncompressed.
   Measured: reboot → gadget back 1.25–1.30 s (was 1.50–1.54), kernel →
   `/init` 0.227 s (was 0.298), SPL card read 0.19 s (was 0.30), bridge
-  pull 6.1 MB/s unchanged. Check `usbproxy-size.cfg` against `.config`
+  pull 6.1 MB/s unchanged. Then `CONFIG_THUMB2_KERNEL=y`: text 3.23 →
+  2.30 MB, uImage 4.46 → 4.25 MB (Thumb-2 code packs worse, so the
+  compressed gain is a fifth of the raw one), reboot → gadget 1.17–1.23 s,
+  `/init` at 0.216 s, bridge unchanged. Check `usbproxy-size.cfg` against `.config`
   after a kernel bump: a `# X is not set` line silently loses to a
   `select`, and the two traps above are exactly that.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
