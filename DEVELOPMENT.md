@@ -902,7 +902,14 @@ the DRAM-droop issue in §8).
   pull 6.1 MB/s unchanged. Then `CONFIG_THUMB2_KERNEL=y`: text 3.23 →
   2.30 MB, uImage 4.46 → 4.25 MB (Thumb-2 code packs worse, so the
   compressed gain is a fifth of the raw one), reboot → gadget 1.17–1.23 s,
-  `/init` at 0.216 s, bridge unchanged. Check `usbproxy-size.cfg` against `.config`
+  `/init` at 0.216 s, bridge unchanged. Then **musl** (`TCLIBC = "musl"`
+  in the distro conf): glibc was the biggest single item left (libc 1.1 MB
+  + libm 0.26 MB + loader 0.12 MB raw, 0.93 MB of the LZ4 uImage); musl's
+  libc.so is 0.56 MB with libm and the loader inside it. Initramfs 2.85 →
+  1.87 MB raw, uImage 4.25 → 3.66 MB, reboot → gadget 1.13–1.16 s,
+  bridge 8.0/6.2 MB/s, console shell, usb-flash-mode/DFU and power-tune
+  all unchanged. The glibc-extras rootfs cleanup became moot and was
+  dropped. Check `usbproxy-size.cfg` against `.config`
   after a kernel bump: a `# X is not set` line silently loses to a
   `select`, and the two traps above are exactly that.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`

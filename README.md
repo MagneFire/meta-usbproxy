@@ -27,8 +27,9 @@ so there's no filesystem to corrupt on power loss.
   display, audio, media, block layer, input, modules, BPF/cgroups or other
   sunxi SoCs (`usbproxy-trim.cfg`, `usbproxy-size.cfg`). `CONFIG_NET` core
   stays because libusb's hotplug uses netlink. Kernel + RAM rootfs is a
-  4.5 MB uImage; usb-proxy is linked statically against libstdc++ so the
-  rootfs does not carry the 1.6 MB shared library.
+  3.7 MB uImage: the distro builds against musl (`TCLIBC = "musl"`), the
+  kernel is Thumb-2, and usb-proxy is linked statically against libstdc++
+  so the rootfs does not carry the 1.6 MB shared library.
 - **Low power.** 0.70 W with a watch attached and idle, of which 0.30 W is the
   watch itself. `power-tune` offlines 2 of the 4 A7 cores at boot, turns off the
   unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the LEDs

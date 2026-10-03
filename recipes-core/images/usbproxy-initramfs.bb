@@ -37,17 +37,4 @@ IMAGE_NAME_SUFFIX = ""
 # DATETIME stamp (the one in the deploy filenames) against the build tree.
 inherit image-buildinfo
 
-# Size (2026-10-03): the SPL reads this rootfs on every boot, so drop the
-# glibc pieces nothing here can use: no DNS or NIS (libresolv, libnsl,
-# libnss_dns, libanl, libnss_compat) and no locale switching
-# (libBrokenLocale). libnss_files stays for the login name lookup.
-usbproxy_drop_glibc_extras() {
-    rm -f ${IMAGE_ROOTFS}${base_libdir}/libresolv.so.* \
-          ${IMAGE_ROOTFS}${base_libdir}/libnsl.so.* \
-          ${IMAGE_ROOTFS}${base_libdir}/libnss_dns.so.* \
-          ${IMAGE_ROOTFS}${base_libdir}/libanl.so.* \
-          ${IMAGE_ROOTFS}${base_libdir}/libnss_compat.so.* \
-          ${IMAGE_ROOTFS}${base_libdir}/libBrokenLocale.so.*
-}
-ROOTFS_POSTPROCESS_COMMAND += "usbproxy_drop_glibc_extras;"
 IMAGE_BUILDINFO_VARS = "DISTRO DISTRO_VERSION MACHINE DATETIME"
