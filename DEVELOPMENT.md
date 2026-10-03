@@ -818,15 +818,36 @@ the DRAM-droop issue in §8).
   `usbproxy-uboot.cfg`: the SPL reads the DTB and the uImage from raw
   sectors (§6) and jumps to the kernel. No sunxi board had a
   `spl_start_uboot()`, so the patch supplies one; U-Boot proper is loaded
-  when a byte is pending on the UART (what `--catch` sends), when the RTC
-  GP0 register holds `usb-flash-mode`'s `DFU1`, when the raw kernel region
-  is not a Linux legacy image (spl_mmc falls through on its own), or when
+  when the RTC GP0 register holds `usb-flash-mode`'s `DFU1`, when the raw
+  kernel region is not a Linux legacy image (spl_mmc falls through on its
+  own), or when
   RTC GP1 still holds the `FLCN` word the SPL writes before every Falcon
   jump — `power-tune boot` clears it once userspace is up, so a Falcon boot
   that dies (watchdog, panic) gets U-Boot proper and the FAT kernel next
   time instead of looping. Two things only U-Boot proper used to do are
   now in `spl_board_prepare_for_linux()`: CNTFRQ for the architected timer
-  and arming the 8 s watchdog (§9). Two things it did are deliberately not
+  and arming the 8 s watchdog (§9). There is no serial key: the first
+  version accepted any pending UART byte (what `--catch` sends), and a
+  cold power-on with nothing on the floating RX produced one, sending a
+  replug boot through U-Boot proper; the board's UART pins are not
+  reachable any more anyway, so the check went (2026-10-03). The SPL
+  stamps RTC GP2/GP3 (load/jump ms, or `0xB007` + why it fell back) and
+  `check` decodes them. **The first Falcon boot after a cold start or a
+  DFU session used to die** and reach userspace only through the GP1
+  guard (`check`: "U-Boot because: last Falcon boot died"). Its ramoops
+  console (readable with `dd if=/dev/mem` at `0x4fc10000`, and only
+  with `ignore_loglevel` on the cmdline — `loglevel=3` keeps everything
+  below KERN_ERR out of the ring) showed cpu1 stamped at 5409 s while
+  cpu0 was at 0.05 s, the clocksource switching to the arch counter at
+  that offset, and an RCU stall: with no firmware non-secure init nothing
+  writes CNTVOFF, so a freshly powered cpu1 (cold, or power-gated by
+  PSCI during a U-Boot proper boot) and cpu0 disagree on the virtual
+  counter the secure-mode kernel was using. Warm reboots survived only
+  because the earlier U-Boot boot had zeroed CNTVOFF on both cores and
+  the watchdog reset keeps it. DT patch 0011 sets the A23/A33 property
+  `arm,cpu-registers-not-fw-configured` so the kernel uses the physical
+  counter and both physical PPIs (non-secure boots keep working); the
+  post-DFU boot has been Falcon since. Two things it did are deliberately not
   replaced: the PSCI monitor and the non-secure switch — the kernel enters
   in secure SVC with no `/psci` node. At first that meant **only cpu0 came
   up**, which cost the bridge ~20 % (below). Since DT patch 0010 the kernel

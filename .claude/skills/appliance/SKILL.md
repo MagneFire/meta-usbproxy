@@ -75,15 +75,17 @@ as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
   usb-moded's charging-only mode, not a proxy fault (DEVELOPMENT.md §7).
   Reseat the watch; that power-cycles the board too (swap and log gone). A
   USB-A port power-cycle does not clear it.
-- **U-Boot stays reachable** even when Linux hangs: `--catch` breaks
-  `bootdelay=0`, and since the SPL Falcon boot (2026-10-03) the same key
-  stream makes the SPL load U-Boot proper instead of the kernel. Only a
-  kernel that never returns to U-Boot (kernel-only uImage, hung init) needs
-  a physical power-cycle first — and a Falcon boot that dies hands the next
-  boot to U-Boot proper on its own (RTC GP1 guard). `check` says which
-  path a boot took (`psci=no` = Falcon); a `U-Boot proper` row on a plain
-  reboot means the raw kernel region is missing or the last Falcon boot
-  died.
+- **No UART any more (2026-10-03):** the board's RX/TX pins are not
+  reachable, so `--catch`, serial `flash` and `boot-ram` are dead paths
+  and the SPL no longer looks for a serial key. The ways in are
+  `flash --usb` (the DFU1 flag set from Linux over the USB console), the
+  RTC GP1 guard (a Falcon boot that dies hands the next boot to U-Boot
+  proper and the FAT kernel), and pulling the card. A kernel that is
+  broken in both copies therefore means a card pull: `boot-ram` the
+  equivalent first is no longer possible, so treat every kernel config
+  change as a card-pull risk and keep the previous deploy dir around.
+  `check` says which path a boot took (`psci=no` = Falcon) and why the
+  SPL fell back (DFU1 flag, last Falcon boot died).
 - **The SPL D-cache lesson**: an SPL change that can hang must come after
   the watchdog arm; U-Boot's `DCACHE_OFF` mapping is execute-never and the
   SPL runs from SRAM at 0x0 (DEVELOPMENT.md §8).
