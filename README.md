@@ -43,7 +43,8 @@ so there's no filesystem to corrupt on power loss.
   `usb-flash-mode` DFU flag, a raw region that is not a Linux image, or a
   previous Falcon boot that never reached userspace (RTC GP1 guard). The
   kernel DTB carries `/memory` and `/chosen/bootargs` so it needs no
-  U-Boot fixups; the price is no PSCI, so Linux runs on cpu0 only. U-Boot
+  U-Boot fixups, and with no PSCI monitor the kernel brings cpu1 up itself
+  through CPUCFG/PRCM (it runs in secure mode; DT patch 0010). U-Boot
   proper keeps `bootdelay=0`, no USB/network boot scan, no Ethernet driver.
   See DEVELOPMENT.md §6 and §8.
 

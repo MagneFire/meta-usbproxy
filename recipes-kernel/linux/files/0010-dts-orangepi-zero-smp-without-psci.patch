@@ -1,0 +1,57 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] dts: orangepi-zero: bring cpu1 up without PSCI (SPL Falcon boot)
+
+The SPL Falcon boot enters the kernel in secure SVC with no PSCI
+monitor, so the "psci" enable-method U-Boot proper used to add is gone
+and Linux ran on cpu0 only, which cost the bridge about 20 % of its
+throughput (6.1 -> 4.9 MB/s, 2026-10-03).
+
+In secure mode the kernel can drive CPUCFG and PRCM itself. The kernel's
+A31 SMP bring-up (reset, L1 reset, the power clamps at PRCM+0x140 and
+the power-off gate at PRCM+0x100) is the sequence U-Boot's psci.c uses
+on the H3, so hand it the two register blocks under the A31 compatibles
+and select it on /cpus. A U-Boot proper boot still puts "psci" on each
+cpu node, which the kernel checks first. The PRCM node is disabled so
+the A31 PRCM MFD driver does not bind on top of the H3's r_ccu; the SMP
+code finds the node by compatible regardless of status. The method has
+no cpu_die, so cpu1 can no longer be offlined; power-tune's idle offline
+turns into a no-op. Applies after 0009.
+
+Upstream-Status: Inappropriate [appliance-specific]
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+--- a/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
++++ b/arch/arm/boot/dts/allwinner/sun8i-h2-plus-orangepi-zero.dts
+@@ -279,3 +279,32 @@
+ 	status = "okay";
+ 	usb0_id_det-gpios = <&pio 6 12 GPIO_ACTIVE_HIGH>; /* PG12 */
+ };
++
++/* usb-proxy appliance: bring cpu1 up without PSCI. The SPL Falcon boot
++ * (U-Boot patch 0003) enters the kernel in secure SVC with no PSCI monitor,
++ * so the PSCI enable-method U-Boot proper used to add is gone and only
++ * cpu0 came up (~20 % less bridge throughput). In secure mode the kernel
++ * can drive CPUCFG and PRCM itself; the A31 bring-up sequence (reset, L1
++ * reset, power clamps at PRCM+0x140, power-off gate at PRCM+0x100) is the
++ * one U-Boot's own psci.c uses on the H3. The method sits on /cpus so a
++ * U-Boot proper boot, which puts enable-method = "psci" on each cpu node,
++ * still wins. The PRCM node is disabled so the A31 PRCM MFD driver stays
++ * away from the H3's r_ccu registers; the SMP code finds it by compatible
++ * regardless of status. No cpu_die in this method: cpu1 cannot be offlined
++ * (power-tune's idle offline becomes a no-op, cpu1 idles in WFI). */
++&{/cpus} {
++	enable-method = "allwinner,sun6i-a31";
++};
++
++&{/soc} {
++	cpucfg@1f01c00 {
++		compatible = "allwinner,sun6i-a31-cpuconfig";
++		reg = <0x01f01c00 0x300>;
++	};
++
++	prcm@1f01400 {
++		compatible = "allwinner,sun6i-a31-prcm";
++		reg = <0x01f01400 0x200>;
++		status = "disabled";
++	};
++};

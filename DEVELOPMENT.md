@@ -828,11 +828,18 @@ the DRAM-droop issue in §8).
   now in `spl_board_prepare_for_linux()`: CNTFRQ for the architected timer
   and arming the 8 s watchdog (§9). Two things it did are deliberately not
   replaced: the PSCI monitor and the non-secure switch — the kernel enters
-  in secure SVC with no `/psci` node, so **only cpu0 comes up**; `maxcpus=2`
-  stays in the cmdline but is moot, and power-tune's cpu1 toggles are no-ops
-  (user decision 2026-10-03: measure first, SMP later; options are the
-  kernel's own sun8i-a23 CPUCFG bring-up on H3 or porting U-Boot's PSCI
-  into the SPL if it fits — the SPL has ~5.7 KB left under its 24 KB limit).
+  in secure SVC with no `/psci` node. At first that meant **only cpu0 came
+  up**, which cost the bridge ~20 % (below). Since DT patch 0010 the kernel
+  brings cpu1 up itself: in secure mode it can drive CPUCFG and PRCM, and
+  the kernel's A31 bring-up (`allwinner,sun6i-a31` on `/cpus`, with
+  cpuconfig/prcm nodes under the A31 compatibles) is the same register
+  sequence U-Boot's `psci.c` uses on the H3. A U-Boot proper boot still
+  puts `psci` on the cpu nodes, which the kernel checks first. The A31
+  method has no `cpu_die`, so cpu1 can no longer be offlined: power-tune's
+  idle offline is a no-op and cpu1 idles in WFI (the whole CPU domain was
+  worth 35 mW in §10, so this is not worth chasing). The PRCM node is
+  `status = "disabled"` so the A31 PRCM MFD driver stays off the H3's
+  r_ccu registers; `of_find_compatible_node` finds it anyway.
   The kernel DTB is the args blob as-is: DT patch 0009 adds `/memory` (256
   MiB, which also pins the size whatever the SPL's detection said) and
   `/chosen/bootargs`; U-Boot proper overwrites both when it does boot.
@@ -864,7 +871,10 @@ the DRAM-droop issue in §8).
   same boot of the same card forced to each path): two cores 6.1 MB/s
   push and pull, one core 4.9 push / 5.0 pull, i.e. ~20 %. A first run on
   one core while the watch was busy (load 2.2) gave 0.8 / 0.6 MB/s — treat
-  a single bad number with suspicion and pair the runs.
+  a single bad number with suspicion and pair the runs. With patch 0010
+  (two cores under Falcon): pull 6.0–6.3 MB/s, push 5.3–7.6 MB/s over
+  three runs, i.e. back at the U-Boot-path level; push varies with the
+  watch, pull is the stable metric.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes

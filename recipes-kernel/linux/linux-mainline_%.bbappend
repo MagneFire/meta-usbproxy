@@ -58,6 +58,11 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    /chosen/bootargs that U-Boot proper used to add at bootm time. When
 #    U-Boot proper does boot (recovery, boot-ram) it overwrites both, so the
 #    fallback path is unchanged.
+#  * 0010-dts-...smp-without-psci: under the Falcon boot the kernel runs in
+#    secure mode with no PSCI, so use the kernel's own A31 CPUCFG/PRCM
+#    bring-up (the same register sequence as U-Boot's H3 psci.c) to get
+#    cpu1 back; U-Boot proper boots still use PSCI. No cpu_die, so cpu1
+#    cannot be offlined any more.
 # CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
 DEPENDS += "lz4-native"
 
@@ -71,6 +76,7 @@ SRC_URI:append = " \
     file://0007-usb-core-skip-config-and-interface-strings.patch \
     file://0008-dts-orangepi-zero-vdd-cpux-1v3.patch \
     file://0009-dts-orangepi-zero-falcon-memory-chosen.patch \
+    file://0010-dts-orangepi-zero-smp-without-psci.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \
