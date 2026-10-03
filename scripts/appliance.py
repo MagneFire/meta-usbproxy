@@ -239,12 +239,25 @@ def check_running(c, ser, expect_md5=None, expect_info=None, adb=False):
     # once power-tune's boot step ran.
     out = A.lx_run(ser, "PATH=$PATH:/usr/sbin:/sbin; echo cpus=$(nproc) "
                         "psci=$([ -d /proc/device-tree/psci ] && echo yes || echo no) "
-                        "gp1=$(devmem 0x01f00104 32) spl_load_ms=$(($(devmem 0x01f00108 32))) "
-                        "spl_jump_ms=$(($(devmem 0x01f0010c 32)))")
+                        "gp1=$(devmem 0x01f00104 32) gp2=$(devmem 0x01f00108 32) "
+                        "gp3=$(devmem 0x01f0010c 32)")
     o = (out or "").strip()
     path = "Falcon (SPL -> kernel)" if "psci=no" in o else (
         "U-Boot proper" if "psci=yes" in o else "?")
-    c.add(None if o else False, "boot path seen from Linux", f"{path}: {o}")
+    # GP2/GP3 as the SPL writes them (u-boot patch 0003): GP2 = load stamp
+    # in ms; GP3 = jump stamp (Falcon) or 0xB007 + the fallback reason.
+    g = dict(re.findall(r"(gp[23])=0x([0-9A-Fa-f]+)", o))
+    try:
+        gp2, gp3 = int(g["gp2"], 16), int(g["gp3"], 16)
+        detail = f"load {gp2 & 0xffffff} ms"
+        if gp3 >> 16 == 0xb007:
+            why = [n for b, n in ((1, "DFU1 flag"), (2, "last Falcon boot died")) if gp3 & b]
+            detail += ", U-Boot because: " + (", ".join(why) or "?")
+        else:
+            detail += f", jump {gp3 & 0xffffff} ms (card read {(gp3 - gp2) & 0xffffff} ms)"
+    except (KeyError, ValueError):
+        detail = "no SPL stamps"
+    c.add(None if o else False, "boot path seen from Linux", f"{path}: {detail}; {o}")
 
     out = A.lx_run(ser, "ls /sys/fs/pstore 2>/dev/null | grep -c dmesg-ramoops")
     n = int(out.strip()) if out and out.strip().isdigit() else 0

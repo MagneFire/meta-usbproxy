@@ -10,10 +10,11 @@ own start-up, its FAT reads and the bootm copy of the 7 MB uImage.
 
 No sunxi board implemented spl_start_uboot() before, so without this the
 weak default always loads U-Boot. U-Boot proper stays on the card at
-sector 0x50 and is chosen when a byte is pending on the UART (what
-scripts/applib.py's --catch produces), when the RTC GP0 register holds
-the appliance's "DFU1" flash request, or automatically when the raw
-kernel region holds no Linux image.
+sector 0x50 and is chosen when the RTC GP0 register holds the
+appliance's "DFU1" flash request, or automatically when the raw kernel
+region holds no Linux image. There is no serial key: the board's UART
+pins are not reachable, and a glitch byte on the floating RX at a cold
+power-on sent one boot through U-Boot proper.
 
 spl_board_prepare_for_linux() takes over the two things only U-Boot
 proper did before: CNTFRQ for the architected timer, and arming the 8 s
@@ -22,7 +23,8 @@ CONFIG_WDT + WATCHDOG_AUTOSTART.
 
 The SPL turns its D-cache on for the loads (page table at 0x4ff40000):
 with the MMU off the PIO MMC read ran at 9.8 MB/s against U-Boot
-proper's 22 MB/s, which ate most of the saving.
+proper's 22 MB/s, which ate most of the saving. The cache is invalidated
+first, since nothing has done that since reset.
 
 A fourth guard makes the experiment safe without a UART: the SPL marks
 RTC GP1 "FLCN" before the jump and power-tune clears it once userspace
@@ -39,11 +41,9 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 ---
 --- a/board/sunxi/board.c
 +++ b/board/sunxi/board.c
-@@ -48,7 +48,11 @@
- #include <nand.h>
+@@ -49,6 +49,9 @@
  #include <net.h>
  #include <spl.h>
-+#include <serial.h>
  #include <sy8106a.h>
 +#include <cpu_func.h>
 +#include <asm/arch/timer.h>
@@ -51,17 +51,17 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
  #include <asm/setup.h>
  #include <status_led.h>
  
-@@ -649,6 +653,132 @@
+@@ -648,7 +651,142 @@
+ 		clock_set_pll1(get_board_sys_clk());
  	else
  		printf("Failed to set core voltage! Can't set CPU frequency\n");
- }
++}
 +#ifdef CONFIG_SPL_OS_BOOT
 +/*
 + * Falcon mode: the SPL boots the Linux kernel straight from raw SD sectors
 + * (CONFIG_SYS_MMCSD_RAW_MODE_{KERNEL,ARGS}_SECTOR) and U-Boot proper is only
-+ * loaded on request. Three ways to ask for it:
-+ *   - a byte waiting on the UART (a key held during the SPL, the same thing
-+ *     that breaks the bootdelay=0 autoboot in U-Boot proper);
++ * loaded on request. The board's UART pins are not reachable any more, so
++ * there is no serial key; the ways in are:
 + *   - the "DFU1" word in the first RTC general-purpose register, which the
 + *     appliance's usb-flash-mode sets before a warm reboot to get U-Boot's
 + *     DFU session (boot.scr reads and clears it);
@@ -75,11 +75,14 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 + */
 +#define USBPROXY_RTC_GP0	(SUNXI_RTC_BASE + 0x100)
 +#define USBPROXY_RTC_GP1	(SUNXI_RTC_BASE + 0x104)
-+/* Boot-time stamps for Linux to read (ms since reset, from the arch timer):
-+ * GP2 = SPL about to load the kernel (DRAM init done), GP3 = about to jump
-+ * (kernel + DTB read from the card). scripts/appliance.py check shows them. */
++/* Boot-time stamps for Linux to read (scripts/appliance.py check shows
++ * them). GP2: ms since reset when the SPL is about to load. GP3 on the
++ * Falcon path: ms since reset at the jump. On the U-Boot path: 0xB007xxxx
++ * with the reason bits below in the low byte. */
 +#define USBPROXY_RTC_GP2	(SUNXI_RTC_BASE + 0x108)
 +#define USBPROXY_RTC_GP3	(SUNXI_RTC_BASE + 0x10c)
++#define USBPROXY_WHY_DFU	0x01	/* DFU1 flag in GP0 */
++#define USBPROXY_WHY_DIED	0x02	/* GP1 still said FLCN */
 +#define USBPROXY_DFU_MAGIC	0x44465531	/* "DFU1" */
 +#define USBPROXY_FALCON_MAGIC	0x464c434e	/* "FLCN" */
 +
@@ -133,21 +136,21 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 +
 +int spl_start_uboot(void)
 +{
-+	int uboot = readl(USBPROXY_RTC_GP0) == USBPROXY_DFU_MAGIC;
++	u32 why = 0;
 +
++	if (readl(USBPROXY_RTC_GP0) == USBPROXY_DFU_MAGIC)
++		why |= USBPROXY_WHY_DFU;
 +	if (readl(USBPROXY_RTC_GP1) == USBPROXY_FALCON_MAGIC) {
 +		writel(0, USBPROXY_RTC_GP1);
 +		puts("SPL: last Falcon boot died\n");
-+		uboot = 1;
++		why |= USBPROXY_WHY_DIED;
 +	}
-+	while (serial_tstc()) {
-+		serial_getc();
-+		uboot = 1;
-+	}
-+	writel(get_timer(0), USBPROXY_RTC_GP2);
-+	puts(uboot ? "SPL: U-Boot\n" : "SPL: Falcon\n");
-+	if (uboot)
++	writel(get_timer(0) & 0xffffff, USBPROXY_RTC_GP2);
++	puts(why ? "SPL: U-Boot\n" : "SPL: Falcon\n");
++	if (why) {
++		writel(0xb0070000 | why, USBPROXY_RTC_GP3);
 +		return 1;
++	}
 +
 +	/*
 +	 * Falcon path. Mark the attempt and arm the watchdog BEFORE anything
@@ -159,10 +162,17 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 +	if (!gd->arch.tlb_addr) {
 +		gd->arch.tlb_size = PGTABLE_SIZE;
 +		gd->arch.tlb_addr = USBPROXY_SPL_PGTABLE;
++		/*
++		 * Nothing has invalidated the D-cache since reset (a cold
++		 * power-on leaves random lines, U-Boot proper's `reset` its
++		 * stale ones for the top of RAM, where this page table lives),
++		 * so do it before enabling.
++		 */
++		invalidate_dcache_all();
 +		dcache_enable();
 +	}
 +	return 0;
-+}
+ }
 +
 +/*
 + * Two things U-Boot proper does on the way to the kernel that the SPL does
@@ -178,7 +188,7 @@ Signed-off-by: usb-proxy appliance <usb-proxy@local>
 +	asm volatile("mcr p15, 0, %0, c14, c0, 0"
 +		     : : "r"(CONFIG_COUNTER_FREQUENCY));
 +	usbproxy_arm_watchdog();	/* restart the 8 s window for the kernel */
-+	writel(get_timer(0), USBPROXY_RTC_GP3);
++	writel(get_timer(0) & 0xffffff, USBPROXY_RTC_GP3);
 +}
 +#endif /* CONFIG_SPL_OS_BOOT */
  #endif /* CONFIG_SPL_BUILD */
