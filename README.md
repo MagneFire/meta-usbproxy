@@ -23,10 +23,12 @@ so there's no filesystem to corrupt on power loss.
   patch (`0002`/`0003`). No vermagic fragility.
 - **`raw_gadget` + musb built into the kernel (`=y`)**, so `/dev/raw-gadget`
   exists at boot with nothing to modprobe.
-- **Trimmed kernel.** Single-purpose H3 config drops the IP-stack drivers,
-  wifi/BT, display, audio, media, RAID and on-disk filesystems — ~3.2 MB uImage,
-  0 modules (`usbproxy-trim.cfg`). `CONFIG_NET` core stays because libusb's
-  hotplug uses netlink.
+- **Trimmed kernel.** Single-purpose H3 config: no IP stack, wifi/BT,
+  display, audio, media, block layer, input, modules, BPF/cgroups or other
+  sunxi SoCs (`usbproxy-trim.cfg`, `usbproxy-size.cfg`). `CONFIG_NET` core
+  stays because libusb's hotplug uses netlink. Kernel + RAM rootfs is a
+  4.5 MB uImage; usb-proxy is linked statically against libstdc++ so the
+  rootfs does not carry the 1.6 MB shared library.
 - **Low power.** 0.70 W with a watch attached and idle, of which 0.30 W is the
   watch itself. `power-tune` offlines 2 of the 4 A7 cores at boot, turns off the
   unused Ethernet PHY's RJ45 LEDs (already gated/in-reset by default; the LEDs

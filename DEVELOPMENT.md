@@ -875,6 +875,33 @@ the DRAM-droop issue in §8).
   (two cores under Falcon): pull 6.0–6.3 MB/s, push 5.3–7.6 MB/s over
   three runs, i.e. back at the U-Boot-path level; push varies with the
   watch, pull is the stable metric.
+- **uImage size trim (2026-10-03): 7.02 → 4.46 MB.** With the SPL reading
+  the uImage at ~23 MB/s and one core inflating it, size is boot time.
+  What was in the 7 MB: the kernel 4.36 MB (text 5.4 MB + rodata 1.1 MB
+  + ksymtab 0.2 MB, LZ4 ≈ 0.54) and the initramfs 2.66 MB (4.4 MB
+  uncompressed, bundled *uncompressed* inside the LZ4 zImage — kernel.bbclass
+  unpacks the cpio.gz before bundling, so there is no second gunzip at boot
+  and the compressor choice stays LZ4 for the 0.35 s gunzip reason above).
+  Three changes: (1) `usbproxy-size.cfg`: H3-only sunxi (keeping
+  MACH_SUN7I, the only selector of HAVE_ARM_ARCH_TIMER — without it the
+  kernel ran on the sun4i timer with a 10 ms jiffies sched_clock), no
+  modules (drops the export tables), no block layer/SCSI/ATA, no
+  input/VT, no I2C/SPI/PWM/DMA/thermal, no BPF/cgroups/perf/suspend, no
+  extra crypto or initramfs decoders — kernel part 4.36 → 2.57 MB, text
+  5.44 → 3.23 MB. Two traps, both hit: `POWER_SUPPLY` and `EXTCON` are
+  dependencies of `PHY_SUN4I_USB`, and dropping them took the USB PHY,
+  musb and EHCI out of the build (Linux came up with no USB and no way
+  in: card pull); dropping SUSPEND took `PM`, `HOTPLUG_CPU` and
+  `ARM_PSCI` with it. The fragment pins all of these. (2) usb-proxy links
+  libstdc++, libgcc and jsoncpp statically with `--gc-sections`: a 543 KB
+  binary instead of 112 KB + 1.63 MB libstdc++.so + 153 KB libjsoncpp.so.
+  (3) the initramfs drops libresolv/libnsl/libnss_dns/libanl/
+  libnss_compat/libBrokenLocale — initramfs 4.44 → 2.85 MB uncompressed.
+  Measured: reboot → gadget back 1.25–1.30 s (was 1.50–1.54), kernel →
+  `/init` 0.227 s (was 0.298), SPL card read 0.19 s (was 0.30), bridge
+  pull 6.1 MB/s unchanged. Check `usbproxy-size.cfg` against `.config`
+  after a kernel bump: a `# X is not set` line silently loses to a
+  `select`, and the two traps above are exactly that.
 - **RJ45 LEDs**: off via `H3_EPHY_LED_POL` (bit17) in syscon `0x01c00030`
   (`power-tune` writes `0x78000`). The PHY is already gated/in-reset at boot; only
   the LED polarity bit needed flipping. The clock-gate/reset/shutdown/MDIO routes
