@@ -27,7 +27,15 @@ set -u
 CONF_DIR=/etc/usb-proxy
 LOG_DIR=/var/volatile/log
 LOG="$LOG_DIR/usb-proxy.log"
+# The log lives in RAM. Rotate it once here, at each (re)spawn, when it has
+# grown past this many bytes; the previous instance's tail is kept in .1.
+# A long-lived persistent-gadget instance is bounded only by usb-proxy's own
+# logging (per-packet lines print at -v only), not by this.
+LOG_MAX=4194304
 mkdir -p "$LOG_DIR"
+if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt "$LOG_MAX" ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
 
 # State across respawns (tmpfs, gone on reboot):
 #   STARTED_STAMP  exists once a usb-proxy instance has run since boot.
