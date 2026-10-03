@@ -72,6 +72,11 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 #    first Falcon boot after a cold start or a DFU session stalled in RCU;
 #    the A23/A33 "arm,cpu-registers-not-fw-configured" property moves the
 #    kernel to the offset-free physical timer (works non-secure too).
+#  * 0012-usb-ehci-retry-the-high-speed-reset: a watch that is re-enabling
+#    its gadget as VBUS comes up at boot misses the first chirp, and EHCI
+#    hands the port to the OHCI companion on that one failure, so the watch
+#    sits at full speed (0.8 MB/s push) until it is unplugged. Let the hub
+#    driver's existing reset retries chirp twice more before the handoff.
 # CONFIG_KERNEL_LZ4 compresses the zImage with the host `lz4` tool.
 DEPENDS += "lz4-native"
 
@@ -87,6 +92,7 @@ SRC_URI:append = " \
     file://0009-dts-orangepi-zero-falcon-memory-chosen.patch \
     file://0010-dts-orangepi-zero-smp-without-psci.patch \
     file://0011-dts-orangepi-zero-physical-arch-timer.patch \
+    file://0012-usb-ehci-retry-the-high-speed-reset-before-the-companion-handoff.patch \
     file://usbproxy.cfg \
     file://usbproxy-trim.cfg \
     file://usbproxy-resilience.cfg \

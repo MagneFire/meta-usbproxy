@@ -1,0 +1,310 @@
+From: usb-proxy appliance <usb-proxy@local>
+Subject: [PATCH] usb: ehci: retry the high-speed reset before the companion handoff
+
+When the appliance boots with the watch in the cradle, VBUS comes up
+and the watch re-runs its gadget setup (enable 0, rewrite, enable 1)
+in the same moment the host runs its first port reset. The chirp gets
+no answer, check_reset_complete() hands the port to the OHCI companion
+and the watch enumerates at full speed:
+
+  usb 2-1: new full-speed USB device number 2 using ohci-platform
+  usb 2-1: not running at top speed; connect to a high speed hub
+
+It stays there until it is unplugged or reboots itself; a proxy
+respawn does not re-enumerate it. Through the proxy that is 0.8 MB/s
+push and 0.6 MB/s pull where the same watch does 4-8 MB/s at high
+speed (2026-10-03, catfish).
+
+The first cold boot with the retry in check_reset_complete() alone
+still landed on the companion without a single retry message, so the
+port is handed over before any reset too: the reset request reads a
+low-speed line state (K) and releases the port on the spot. During
+charger detection a device can hold D- high as well.
+
+hub_port_reset() already retries a reset that leaves the port disabled
+(PORT_RESET_TRIES, 200 ms apart), but both handoffs happen inside the
+first attempt, so the retry never gets to chirp again. So reset the
+port regardless of the line state, count the resets that leave it
+disabled, report them as-is and hand the port over on the fourth.
+
+That alone was not enough: a cold boot with it logged four unanswered
+chirps between 0.70 s and 1.36 s and still ended on the companion,
+while clearing PORT_OWNER by hand minutes later made the same watch
+enumerate at high speed on the first reset. So the watch needs longer
+than the hub driver's retry loop can give it. After a handoff the port
+is therefore taken back from the companion a second later (clearing
+PORT_OWNER, which the companion sees as a disconnect and we see as a
+new connect) for another round, up to four times per episode. A
+genuine full-speed device is re-enumerated those few times, then stays
+with the companion. A real unplug or replug ends the episode and
+cancels a pending reclaim (the connect change a reclaim produces is
+told apart from a physical one). A root hub with nothing attached
+autosuspends at once, so the work resumes it synchronously and holds
+it until the owner bit is written. Each step logs what it did, so dmesg
+says how many rounds it took.
+
+Signed-off-by: usb-proxy appliance <usb-proxy@local>
+---
+diff --git a/drivers/usb/host/ehci-hcd.c b/drivers/usb/host/ehci-hcd.c
+index 802bfaf..0faebdb 100644
+--- a/drivers/usb/host/ehci-hcd.c
++++ b/drivers/usb/host/ehci-hcd.c
+@@ -434,6 +434,7 @@ static void ehci_stop (struct usb_hcd *hcd)
+ 	ehci_reset (ehci);
+ 
+ 	hrtimer_cancel(&ehci->hrtimer);
++	cancel_delayed_work_sync(&ehci->fs_reclaim_work);
+ 	remove_sysfs_files(ehci);
+ 	remove_debug_files (ehci);
+ 
+@@ -469,6 +470,7 @@ static int ehci_init(struct usb_hcd *hcd)
+ 	hrtimer_init(&ehci->hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+ 	ehci->hrtimer.function = ehci_hrtimer_func;
+ 	ehci->next_hrtimer_event = EHCI_HRTIMER_NO_EVENT;
++	INIT_DELAYED_WORK(&ehci->fs_reclaim_work, ehci_fs_reclaim_work);
+ 
+ 	hcc_params = ehci_readl(ehci, &ehci->caps->hcc_params);
+ 
+diff --git a/drivers/usb/host/ehci-hub.c b/drivers/usb/host/ehci-hub.c
+index 1aee392..4c93bdd 100644
+--- a/drivers/usb/host/ehci-hub.c
++++ b/drivers/usb/host/ehci-hub.c
+@@ -567,14 +567,104 @@ static void set_owner(struct ehci_hcd *ehci, int portnum, int new_owner)
+ 
+ /*-------------------------------------------------------------------------*/
+ 
++#include <linux/pm_runtime.h>
++
++/*
++ * Resets a connected port gets before it is handed to the companion
++ * controller. Every attempt is a real reset, a low-speed line state
++ * included, and only a reset that leaves the port disabled (no high-speed
++ * chirp answered) counts. hub_port_reset() retries such a reset up to
++ * PORT_RESET_TRIES (5) times, 200 ms apart, so this must stay below that
++ * for the handoff to still happen inside the hub driver's retry loop.
++ */
++#define EHCI_FS_HANDOFF_TRIES	4
++
++/*
++ * Once a port has been handed over, take it back from the companion after
++ * this delay for another round of high-speed resets, up to this many times
++ * per episode (a new episode starts when the previous handoff is more than
++ * EHCI_FS_EPISODE_MS ago). A watch that was mid charger detection at the
++ * first rounds answers the chirp a few seconds later; a genuine full-speed
++ * device gets re-enumerated these few times and then stays with the
++ * companion.
++ */
++#define EHCI_FS_RECLAIMS	4
++#define EHCI_FS_RECLAIM_DELAY_MS	1000
++#define EHCI_FS_EPISODE_MS	30000
++
++/* Caller holds ehci->lock. Called from the two handoff sites. */
++static void ehci_fs_handoff_done(struct ehci_hcd *ehci, int index)
++{
++	if (time_after(jiffies, ehci->fs_handoff_jiffies[index] +
++				msecs_to_jiffies(EHCI_FS_EPISODE_MS))) {
++		ehci->fs_reclaims[index] = 0;
++		clear_bit(index, &ehci->fs_reclaimed_ports);
++	}
++	ehci->fs_handoff_jiffies[index] = jiffies;
++	ehci->fs_handoff_tries[index] = 0;
++	if (ehci->fs_reclaims[index] < EHCI_FS_RECLAIMS) {
++		set_bit(index, &ehci->fs_reclaim_ports);
++		schedule_delayed_work(&ehci->fs_reclaim_work,
++				msecs_to_jiffies(EHCI_FS_RECLAIM_DELAY_MS));
++	} else {
++		ehci_info(ehci, "port %d stays with the companion after %d reclaims\n",
++			index + 1, ehci->fs_reclaims[index]);
++	}
++}
++
++static void ehci_fs_reclaim_work(struct work_struct *work)
++{
++	struct ehci_hcd	*ehci = container_of(to_delayed_work(work),
++					struct ehci_hcd, fs_reclaim_work);
++	struct usb_device *rh = ehci_to_hcd(ehci)->self.root_hub;
++	unsigned long	flags;
++	int		port;
++
++	if (!rh)
++		return;
++	/*
++	 * With the device on the companion nothing is attached to us, and a
++	 * root hub autosuspends with no delay. Resume it here, synchronously,
++	 * and keep it awake until the owner bit has been written; the connect
++	 * that follows keeps it up from there.
++	 */
++	pm_runtime_get_sync(&rh->dev);
++	spin_lock_irqsave(&ehci->lock, flags);
++	for (port = 0; port < HCS_N_PORTS(ehci->hcs_params); port++) {
++		u32 __iomem	*reg = &ehci->regs->port_status[port];
++		u32		status;
++
++		if (!test_and_clear_bit(port, &ehci->fs_reclaim_ports))
++			continue;
++		if (ehci->rh_state != EHCI_RH_RUNNING) {
++			ehci_info(ehci, "port %d reclaim dropped, root hub not running\n",
++				port + 1);
++			continue;
++		}
++		status = ehci_readl(ehci, reg);
++		if (!(status & PORT_OWNER))
++			continue;
++		ehci->fs_reclaims[port]++;
++		set_bit(port, &ehci->fs_reclaimed_ports);
++		ehci_info(ehci, "port %d taken back from the companion for another high-speed try (%d)\n",
++			port + 1, ehci->fs_reclaims[port]);
++		/* The companion sees a disconnect, we see a fresh connect. */
++		ehci_writel(ehci, status & ~(PORT_RWC_BITS | PORT_OWNER), reg);
++	}
++	spin_unlock_irqrestore(&ehci->lock, flags);
++	pm_runtime_put(&rh->dev);
++}
++
+ static int check_reset_complete (
+ 	struct ehci_hcd	*ehci,
+ 	int		index,
+ 	u32 __iomem	*status_reg,
+ 	int		port_status
+ ) {
+-	if (!(port_status & PORT_CONNECT))
++	if (!(port_status & PORT_CONNECT)) {
++		ehci->fs_handoff_tries[index] = 0;
+ 		return port_status;
++	}
+ 
+ 	/* if reset finished and it's still not enabled -- handoff */
+ 	if (!(port_status & PORT_PE)) {
+@@ -587,6 +677,26 @@ static int check_reset_complete (
+ 			return port_status;
+ 		}
+ 
++		/*
++		 * A high-speed device that is re-enabling its gadget while
++		 * the chirp runs (a watch running android-gadget-setup as
++		 * VBUS comes up at boot) fails the chirp once and would then
++		 * sit on the companion at full speed until it is unplugged.
++		 * Report the disabled port as-is for the first attempts so
++		 * hub_port_reset() resets, and chirps, again; hand over only
++		 * once those retries are used up, so a genuine full-speed
++		 * device still ends up on the companion.
++		 */
++		if (++ehci->fs_handoff_tries[index] < EHCI_FS_HANDOFF_TRIES) {
++			ehci_info(ehci,
++				"port %d not high speed after reset %d, retrying before companion handoff\n",
++				index + 1, ehci->fs_handoff_tries[index]);
++			return port_status;
++		}
++		ehci_info(ehci, "port %d not high speed after %d resets, handing it to the companion\n",
++			index + 1, ehci->fs_handoff_tries[index]);
++		ehci_fs_handoff_done(ehci, index);
++
+ 		ehci_dbg (ehci, "port %d full speed --> companion\n",
+ 			index + 1);
+ 
+@@ -599,6 +709,8 @@ static int check_reset_complete (
+ 		if (ehci->has_amcc_usb23)
+ 			set_ohci_hcfs(ehci, 1);
+ 	} else {
++		ehci->fs_handoff_tries[index] = 0;
++		ehci->fs_reclaims[index] = 0;
+ 		ehci_dbg(ehci, "port %d reset complete, port enabled\n",
+ 			index + 1);
+ 		/* ensure 440EPx ohci controller state is suspended */
+@@ -841,6 +953,16 @@ int ehci_hub_control(
+ 			}
+ 			break;
+ 		case USB_PORT_FEAT_C_CONNECTION:
++			ehci->fs_handoff_tries[wIndex] = 0;
++			/*
++			 * The connect change our own reclaim produced keeps
++			 * the episode's reclaim count; a real unplug or
++			 * replug starts over.
++			 */
++			if (!test_and_clear_bit(wIndex, &ehci->fs_reclaimed_ports)) {
++				ehci->fs_reclaims[wIndex] = 0;
++				clear_bit(wIndex, &ehci->fs_reclaim_ports);
++			}
+ 			ehci_writel(ehci, temp | PORT_CSC, status_reg);
+ 			break;
+ 		case USB_PORT_FEAT_C_OVER_CURRENT:
+@@ -1097,31 +1219,38 @@ int ehci_hub_control(
+ 			 * which can be fine if this root hub has a
+ 			 * transaction translator built in.
+ 			 */
++			/*
++			 * The stock driver released a port whose line state
++			 * reads low speed (K) to the companion here, before
++			 * any reset. A high-speed device still busy with
++			 * charger detection or its own gadget setup (a watch
++			 * as VBUS comes up) can show K too, so reset
++			 * regardless: a low-speed device just ends up
++			 * disabled and is counted and handed over by
++			 * check_reset_complete() like a failed chirp.
++			 */
+ 			if ((temp & (PORT_PE|PORT_CONNECT)) == PORT_CONNECT
+ 					&& !ehci_is_TDI(ehci)
+-					&& PORT_USB11 (temp)) {
+-				ehci_dbg (ehci,
+-					"port %d low speed --> companion\n",
+-					wIndex + 1);
+-				temp |= PORT_OWNER;
+-			} else {
+-				temp |= PORT_RESET;
+-				temp &= ~PORT_PE;
+-
+-				/*
+-				 * caller must wait, then call GetPortStatus
+-				 * usb 2.0 spec says 50 ms resets on root
+-				 */
+-				ehci->reset_done [wIndex] = jiffies
+-						+ msecs_to_jiffies (50);
+-
+-				/*
+-				 * Force full-speed connect for FSL high-speed
+-				 * erratum; disable HS Chirp by setting PFSC bit
+-				 */
+-				if (ehci_has_fsl_hs_errata(ehci))
+-					temp |= (1 << PORTSC_FSL_PFSC);
+-			}
++					&& PORT_USB11 (temp))
++				ehci_info(ehci,
++					"port %d line state low speed before reset %d, resetting anyway\n",
++					wIndex + 1, ehci->fs_handoff_tries[wIndex] + 1);
++			temp |= PORT_RESET;
++			temp &= ~PORT_PE;
++
++			/*
++			 * caller must wait, then call GetPortStatus
++			 * usb 2.0 spec says 50 ms resets on root
++			 */
++			ehci->reset_done [wIndex] = jiffies
++					+ msecs_to_jiffies (50);
++
++			/*
++			 * Force full-speed connect for FSL high-speed
++			 * erratum; disable HS Chirp by setting PFSC bit
++			 */
++			if (ehci_has_fsl_hs_errata(ehci))
++				temp |= (1 << PORTSC_FSL_PFSC);
+ 			ehci_writel(ehci, temp, status_reg);
+ 			break;
+ 
+diff --git a/drivers/usb/host/ehci.h b/drivers/usb/host/ehci.h
+index 1441e34..fef228c 100644
+--- a/drivers/usb/host/ehci.h
++++ b/drivers/usb/host/ehci.h
+@@ -176,6 +176,13 @@ struct ehci_hcd {			/* one per controller */
+ 
+ 	/* per root hub port */
+ 	unsigned long		reset_done[EHCI_MAX_ROOT_PORTS];
++	/* appliance: high-speed retries before/after a companion handoff */
++	unsigned char		fs_handoff_tries[EHCI_MAX_ROOT_PORTS];
++	unsigned char		fs_reclaims[EHCI_MAX_ROOT_PORTS];
++	unsigned long		fs_handoff_jiffies[EHCI_MAX_ROOT_PORTS];
++	unsigned long		fs_reclaim_ports;	/* reclaim scheduled */
++	unsigned long		fs_reclaimed_ports;	/* next connect is ours */
++	struct delayed_work	fs_reclaim_work;
+ 
+ 	/* bit vectors (one bit per port) */
+ 	unsigned long		bus_suspended;		/* which ports were
