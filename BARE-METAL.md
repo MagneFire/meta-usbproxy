@@ -567,6 +567,28 @@ use p50/p90. Fix pending in trace.cpp.
   Found en route: upstream `dcd_sunxi_musb.c` never sends a zero-length IN
   transfer (returns "complete" without TXPKTRDY); fixed in the fork.
 
+- **M2 (2026-10-10, 00:00–00:50): the watch over EHCI1.** TinyUSB's
+  `ehci.c` forked (`src/usb/ehci_h3.c`): port speed from PORTSC, no NXP TT
+  register, busy-endpoint guard, companion-handover flag — and two upstream
+  bugs in its standard-EHCI branch, which NXP's ChipIdea targets never
+  compile: a frame-list macro that does not exist, and the completion ISR
+  walking periodic intervals up to `FRAMELIST_SIZE` (256) when only four
+  period heads exist (1/2/4/8 ms) — it ran off `period_head_arr[]` on the
+  first completion and hung the core with IRQs masked (found with RTC GP0
+  breadcrumbs across the watchdog reset: last word written = ISR #2
+  entry). Glue (`hcd_h3_ehci.c`): PHY1 (PMU1 ICR 0x701, SIDDQ clear,
+  tuning), HCRESET, ITC = 1 µframe, CONFIGFLAG, port power, GIC 106.
+  Result: the watch (18d1:d001) enumerates at **high speed in 35 ms / 8
+  interrupts**, interface 0 (ff/42/01) binds to host slot 0 (0x81/0x01),
+  mounted ~270 ms after firmware entry. adb CNXN exchange from the console:
+  header 24 B in 54 µs, payload 7 B in 91 µs (adbd drops a combined
+  31-byte packet — header and payload must be separate transfers, as adb
+  and the appliance send them), the watch's CNXN reply (legacy transport,
+  maxdata 4096) 4.7 ms later, its 63-byte banner read in 61 µs. Idle: ~4
+  IRQ/s (256 ms frame-list rollover). Firmware 39.8 KB. Still owed for the
+  M2 exit: a cold cradled boot from the card (Falcon), attach/detach cycles,
+  abort-on-unplug.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
