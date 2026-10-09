@@ -18,7 +18,7 @@ SRC_URI = "git://github.com/MagneFire/usb-proxy.git;protocol=https;branch=opi \
 # (never-drop bulk OUT, async OUT, adb_ack_accel), device-loss handling, the
 # power hook, and the persistent gadget with its CDC-ACM console
 # (DEVELOPMENT.md 7 and 8). Bump to advance.
-SRCREV = "e0136113a992a61383edf997ca717985bc3ae6e4"
+SRCREV = "71eb894c9c390ea1cbcce43a39da0bc6230c8418"
 PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
@@ -44,7 +44,7 @@ do_compile() {
         -I${WORKDIR}/jsoncpp-compat \
         usb-proxy.cpp host-raw-gadget.cpp device-libusb.cpp proxy.cpp misc.cpp \
         power-policy.cpp console-acm.cpp console-shell.cpp gadget-ep0.cpp \
-        gadget-fixed.cpp bridge.cpp \
+        gadget-fixed.cpp bridge.cpp trace.cpp \
         ${LDFLAGS} -Wl,--gc-sections -static-libstdc++ -static-libgcc \
         -lusb-1.0 -pthread -Wl,-Bstatic -ljsoncpp -Wl,-Bdynamic -lutil \
         -o usb-proxy

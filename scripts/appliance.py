@@ -708,6 +708,116 @@ def cmd_soak(args):
     sys.exit(r.returncode)
 
 
+# --------------------------------------------------------------------------- #
+# bm: the bare-metal firmware (~/Downloads/usbproxy-bm), loaded over the UART
+# dongle through U-Boot proper (`loady` + `go`, nothing written) or written to
+# the card's Falcon kernel sector (`mmc write` + reset), then graded.
+# --------------------------------------------------------------------------- #
+BM_LOAD = "0x40008000"
+BM_FIRST_PROMPT_S = 20
+
+
+def bm_grade(c, ser, text, expect_rev=None):
+    r = A.boot_report(text)
+    c.add(r["bm_banner"], "usbproxy-bm banner", "")
+    c.add(r["bm_prompt"], "bm> prompt reached", "")
+    if not r["bm_prompt"]:
+        return None
+    # "up" means the host configured the gadget, which takes the Mac a few
+    # seconds after the prompt appears.
+    st = A.bm_status(ser)
+    for _ in range(20):
+        if st.get("up") == "1":
+            break
+        time.sleep(0.5)
+        st = A.bm_status(ser)
+    c.add(st.get("up") == "1", "firmware up (host configured, GP1 cleared)", f"gp1={st.get('gp1')} usb_mounted={st.get('usb_mounted')} speed={st.get('usb_speed')}")
+    c.add(st.get("wdt") == "1", "watchdog armed", "")
+    c.add(st.get("fault", "none") == "none", "no fault record", st.get("fault", ""))
+    if expect_rev:
+        c.add(st.get("build", "").startswith(expect_rev), "build id", f"{st.get('build')} (local {expect_rev})")
+    else:
+        c.add(None, "build id", st.get("build", "?"))
+    c.add(None, "entry stamp", f"entry_ms={st.get('entry_ms')} gp2={st.get('gp2')} gp3={st.get('gp3')}")
+    return st
+
+
+def bm_local_rev(path):
+    r = subprocess.run(["git", "-C", str(pathlib.Path(path).resolve().parent.parent),
+                        "rev-parse", "--short=10", "HEAD"], capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def cmd_bm(args):
+    op = args.op
+    if op == "cmd":
+        ser = A.open_serial(timeout=1.0)
+        if not A.bm_confirm_prompt(ser):
+            fail("no `bm> ` prompt on the console")
+        print(A.bm_run(ser, " ".join(args.rest), timeout=args.timeout))
+        return
+    if op == "log":
+        ser = A.open_serial(timeout=1.0)
+        if not A.bm_confirm_prompt(ser):
+            fail("no `bm> ` prompt on the console")
+        print(A.bm_run(ser, f"log {args.rest[0] if args.rest else 4096}", timeout=10))
+        return
+    if op == "check":
+        c = Check()
+        ser = A.open_serial(timeout=1.0)
+        if not A.bm_confirm_prompt(ser):
+            fail("no `bm> ` prompt on the console")
+        st = bm_grade(c, ser, "usbproxy-bm bm> ", expect_rev=None)
+        if args.adb:
+            c.add(adb_sees_device(), "adb sees the watch", "")
+        for k, v in (st or {}).items():
+            say(f"  {k}={v}")
+        sys.exit(0 if c.report() else 1)
+
+    if not args.rest:
+        fail(f"bm {op}: need the firmware file (fw.bin for run, fw.uimg for flash)")
+    p = pathlib.Path(args.rest[0])
+    data = p.read_bytes()
+    rev = bm_local_rev(p)
+    log = open_log(f"bm-{op}")
+    ser = A.open_serial(timeout=1.0)
+    if not A.ub_catch_prompt(ser):
+        fail("did not reach the U-Boot prompt")
+    say("at U-Boot prompt")
+    crc = A.ub_loady(ser, BM_LOAD, data, p.name, baud=args.baud or None, progress=say)
+    c = Check()
+    if op == "run":
+        if "uimg" in p.name:
+            fail("bm run takes the raw fw.bin (the uImage header would be executed)")
+        say(f"go {BM_LOAD}")
+        ser.reset_input_buffer()
+        ser.write(f"go {BM_LOAD}\n".encode())
+        ser.flush()
+        saved = ser.timeout
+        ser.timeout = 0.05
+        time.sleep(0.2)
+        ser.baudrate = A.BAUD   # the firmware re-inits UART0 at 115200
+        text, _ = A.read_until(ser, [A.BM_PROMPT], BM_FIRST_PROMPT_S, log=log)
+        ser.timeout = saved
+    else:   # flash
+        if "uimg" not in p.name:
+            fail("bm flash takes the mkimage-wrapped fw.uimg (the SPL needs the legacy header)")
+        A.ub_raw_write(ser, BM_LOAD, A.KERNEL_SECTOR, data, crc, p.name, log=say)
+        text = A.ub_reset_and_watch(ser, timeout=BM_FIRST_PROMPT_S + 10, log_file=log)
+        r = A.boot_report(text)
+        c.add(r["falcon"], "SPL took the Falcon path", "")
+        c.add(r["dram_mib"] is not None, "SPL DRAM banner", f"{r['dram_mib']} MiB")
+    for l in text.replace("\r", "").splitlines()[-12:]:
+        say("  | " + l)
+    st = bm_grade(c, ser, text, expect_rev=rev)
+    if args.adb:
+        c.add(adb_sees_device(), "adb sees the watch", "")
+    ser.close()
+    if op == "run":
+        say("RAM only: the card's own payload comes back on the next reset.")
+    sys.exit(0 if c.report() else 1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -746,6 +856,14 @@ def main():
     p.add_argument("--cold", action="store_true", help="power-cycle instead of reboot (prompts you)")
     p.add_argument("--power-cmd", help="command that cycles the supply, for --cold")
     p.set_defaults(fn=cmd_soak)
+
+    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | check | cmd <text> | log [bytes]")
+    p.add_argument("op", choices=["run", "flash", "check", "cmd", "log"])
+    p.add_argument("rest", nargs="*")
+    p.add_argument("--baud", type=int, default=750000, help="Y-modem rate (default 750000; 0 = stay at 115200)")
+    p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for `cmd` output")
+    p.add_argument("--adb", action="store_true")
+    p.set_defaults(fn=cmd_bm)
 
     args = ap.parse_args()
     args.fn(args)

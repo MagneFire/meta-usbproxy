@@ -1,0 +1,642 @@
+# Going bare metal — research notes (2026-10-09)
+
+Question: what would it take to replace Linux + usb-proxy on the appliance
+with a single bare-metal firmware for the Orange Pi Zero (H2+), what would
+it buy, and is it worth it. Specific to this board and this watch bridge;
+nothing here tries to stay generic. Scope decisions taken the same day:
+DFU/U-Boot proper are out of scope; the SPL stays as the boot0 for now;
+the work is done on a **stock, unrepaired, known-good Orange Pi Zero**,
+not the repaired appliance unit — so the UART header is available and the
+repaired unit's power-rail history does not apply.
+
+Status: research only, nothing built. Reviewed by Codex (gpt-6.1-sol) the
+same day; §9 lists its findings with a verdict on each, and the sections
+above it already carry the corrections.
+
+## 0. Short version
+
+- **The boot-time win is small.** The persistent gadget only boots at
+  power-on. Today a warm `reboot -f` has the gadget back in 1.13–1.16 s;
+  of the SPL's 0.30 s, 0.19 s is the card read of the 3.66 MB uImage,
+  which goes away with a ≤100 KB payload. A bare-metal gadget should be
+  attached ~0.15–0.25 s after the SPL starts, i.e. ~0.9 s saved per
+  power-on — and that is a warm-reboot number; cold power-on → configured
+  has never been measured on this rig. Cradle attach → adb improves by
+  only ~0.2–0.3 s (the kernel's enumeration overhead and the proxy's
+  100 ms poll); the rest of that path is the watch itself and adb's 1 Hz
+  rescan on the Mac.
+- **The real prize is latency, and it is unproven.** The watch's legacy
+  adb keeps one 4 KB WRTE in flight per stream, so a saturated stream is
+  bounded by `4096 / (WRTE→OKAY cycle)`. Today that cycle is ~1 ms
+  through the appliance with the ack accelerator off (3.7–4.0 MB/s push;
+  the 1.3 ms figure in MUSB-BULK-OUT.md predates the condvar/timer-slack
+  trims) against ~0.45 ms direct (9.1 MB/s). The accelerator exists only
+  to hide that gap. An interrupt-driven bare-metal forwarder with no
+  syscalls, no thread handoffs and no libusb *might* approach the direct
+  cycle, which would make the accelerator (ACK spoofing; the CNXN/framing
+  parser stays) unnecessary and give pull the same rate as push. Nothing
+  else in this document justifies the port, so that number is measured
+  first — on the current appliance before any code (M-1), then on the
+  prototype (M3) — and decides it.
+- **Everything the 12 kernel patches fix moves into our own drivers.**
+  The specific fixes are a few lines each; the enumeration, disconnect
+  and DMA-lifetime handling around them is not. U-Boot proper goes (DFU
+  is out of scope); the SPL stays as the boot0 — DRAM init, card read,
+  jump — and the firmware is just a different Falcon payload. Recovery
+  and the dev loop move to FEL (`sunxi-fel` from the Mac on the OTG port).
+- **Stack choice: TinyUSB** (MIT, no RTOS) for the spike, conditionally.
+  It has a sunxi musb device driver (`src/portable/sunxi/dcd_sunxi_musb.c`,
+  F1C100s, same sunxi register remap as the H3) and an EHCI host driver
+  (`src/portable/ehci/ehci.c`) that has run on the H3's EHCI before
+  (uli/allwinner-bare-metal) — but the EHCI driver carries NXP-specific
+  bits, leaves the interrupt threshold at its 1 ms default and runs one
+  transfer per endpoint at a time, so it is an adaptation, not a drop-in.
+  CherryUSB has the closer-fitting drivers (explicit `CONFIG_USB_MUSB_SUNXI`
+  register map, Allwinner EHCI/OHCI glue, a URB queue) but its host stack
+  needs an RTOS thread, semaphore and message queue; it stays the
+  alternative if the superloop's completion→rearm latency disappoints.
+- **Cost: ~4 weeks for the spike through a first bridge (M-1…M3), 8–12+
+  weeks for parity** with what the appliance does today (Codex's estimate
+  for parity; I accept it). The stock dev unit has the 3-pin UART header,
+  so printf debugging is there from the first instruction — the SPL
+  already prints on it — which takes the "nothing visible until musb
+  works" risk off the table.
+- **Recommendation:** do M-1 now (a day, no code: measure the current
+  cycle with `adb_ack_accel: false` and stamp where the ~1 ms goes), then
+  M0–M3 as a bounded spike with a hard go/no-go on the measured cycle.
+  Do not commit to parity work before the number is in.
+
+## 1. What has to be matched (the appliance today)
+
+Numbers from DEVELOPMENT.md §8–§10 and MUSB-BULK-OUT.md, all measured on
+this rig.
+
+| Thing | Today |
+|---|---|
+| Boot, warm `reboot -f` → gadget back on the Mac | 1.13–1.16 s (SPL 0.30 s, of which card read 0.19 s; zImage inflate; kernel → `/init` 0.216 s; usb-proxy fork → attach) |
+| Cradle attach → adb transport (reconnect) | 1.85 s after the kernel's enumeration line, of which 1.0 s is the settle debounce and ~0.9 s adb's own IOKit rescan |
+| Bridge throughput (catfish, HS watch) | push 5.3–7.6, pull 6.0–6.3 MB/s with `adb_ack_accel`; without it push 3.7–4.0 MB/s (≈1 ms WRTE→OKAY cycle), pull 1.3 MB/s (pull's sized bulk-IN reads only exist with the accelerator on); 9.1 MB/s direct to the Mac (≈0.45 ms) |
+| Image | 3.66 MB uImage (kernel + musl initramfs + static usb-proxy) |
+| Kernel patches | 12 (musb RX flush, force-peripheral, DT trims, string-read quirk, bus-clock policy, Falcon DT, SMP without PSCI, arch-timer, EHCI HS retry/reclaim) |
+| U-Boot patches | 3 (DRAM pattern size test, `board_usb_init` for DFU, SPL Falcon + watchdog + RTC guards) |
+| Resilience | 8 s hardware watchdog from the SPL; panic → reboot; ramoops/pstore post-mortem; RTC GP1 "last Falcon boot died" → U-Boot proper |
+| Power | 0.70 W with the watch idle; the whole CPU/clock domain is worth 35 mW |
+| Recovery/flashing | U-Boot proper + DFU over the OTG port (`usb-flash-mode`, RTC GP0 `DFU1`); no UART reachable on the appliance unit |
+| Operator surface | CDC-ACM root shell on the gadget; `appliance.py swap/boot-ram/flash/check/soak` over it |
+
+What the bridge actually does (bridge.cpp, gadget-fixed.cpp, proxy.cpp): one
+fixed gadget `USBPROXY01` (adb iface ff/42/01, fastboot ff/42/03, CDC-ACM
+console), never re-enumerated; each slot binds to whatever bulk pair the
+watch currently exposes; the idle adb slot NAKs its IN and a sink thread
+drains its OUT so the host's CNXN is captured in user space; IN halt pulse
+on unbind so the Mac's adb drops its transport; host→device stream kept
+framed across binds and the last CNXN replayed to a fresh adbd; fastboot
+slot never halted (musb toggle reset); SET_CONFIGURATION not re-sent to an
+already configured watch; 1 s settle before a new device is bridged;
+queued IN data drained for ~300 ms before a device is dropped (fastboot
+sends its OKAY and vanishes); fastboot download tail sizing; the
+two-direction ack accelerator. That is the feature list a bare-metal port
+must carry, and it is a few thousand lines of logic independent of Linux.
+
+## 2. What bare metal changes, honestly
+
+**Boot.** The SPL stays (it is the only thing that inits DRAM, and the
+Falcon path already loads "a Linux legacy image from sector 0x18800 and
+jumps to it with the DTB address in r2"). A firmware wrapped with
+`mkimage -A arm -O linux -T kernel` is loaded by the unmodified SPL. The
+SPL's 0.30 s is ~0.11 s of DRAM init and fixed cost plus the 0.19 s read
+of the 3.66 MB uImage; a ≤100 KB payload reads in ~5 ms, and there is no
+inflate, no kernel init, no init chain after it. Expect the gadget on the
+Mac ~0.15–0.25 s after the SPL starts (PHY reset waits and the Mac's own
+enumeration are what remain). Savings ≈ 0.9 s per power-on, and power-on
+is the only time the Mac sees this gadget appear. Cold power-on has its
+own unmeasured costs (BROM, SD detect, the watch's readiness).
+
+**Latency / throughput (the thesis).** Today one 4 KB WRTE host→watch goes:
+musb RX IRQ → raw-gadget completion → usb-proxy read thread wakes →
+`bridge_out_feed` → async libusb submit → usbfs ioctl → EHCI qTD → EHCI IRQ
+→ usbfs completion → libusb event thread → callback, and the watch's OKAY
+comes back through the mirror. Two scheduler handoffs and ~6 syscalls per
+direction on a 648 MHz core; ~1 ms per cycle today. Bare metal: musb RX
+IRQ → PIO copy of 512 B → write one qTD → EHCI issues it in the async
+schedule (several bulk transactions can go in one microframe; NAK
+reload and the async-advance doorbell can also add delay); the reverse
+is an EHCI IRQ → PIO into the musb TX FIFO. Two things decide whether
+that approaches the direct 0.45 ms: (1) **EHCI's Interrupt Threshold
+Control defaults to 8 microframes = 1 ms** on the H3 (datasheet p. 493);
+Linux programs 1 microframe, TinyUSB leaves the default — the firmware
+must set it to 1 while halted or every completion costs up to a
+millisecond; (2) the per-packet service cost on the gadget side: at
+9 MB/s that is ~17,600 FIFO packet services per second, each an IRQ,
+INDEX/CSR accesses on device memory, the copy and the rearm — budget
+≤10 µs each or the single core is the bottleneck. The floor underneath
+both is the watch's own turnaround, which nobody has measured in
+isolation; a programmable bulk responder on the host port (or the watch
+with a known echo service) separates bridge latency from watch latency.
+If the cycle stays around 0.8–1 ms the port gives nothing here.
+
+**Patches.** All 12 kernel patches become moot, because the driver is ours:
+
+| Kernel patch | Becomes |
+|---|---|
+| 0001 musb RX FLUSHFIFO on requeue | never flush RX in our driver (the MUSB-BULK-OUT.md lesson, one line) |
+| 0002 force peripheral, 0003 DT trim (PHY0 → musb) | PHY0 routing register written once at init (`OTGCTL` bit 0 at `0x01c19420`), ISCR forced ID high / VBUS valid |
+| 0004, 0008 CPU cap and 1.3 V rail | no DVFS at all: one core, one clock, rail left where the SPL put it |
+| 0005 no mmc0, 0006 bus clocks | nothing to disable; nothing to wind down (35 mW total, not worth code) |
+| 0007 skip iConfiguration/iInterface strings | our enumeration never asks for them |
+| 0009–0011 Falcon DT, SMP without PSCI, physical arch timer | no DT; cpu1 never started; CNTFRQ set by the SPL patch already, use the physical counter |
+| 0012 EHCI HS reset retry + companion reclaim | our port-reset policy: a timed retry state machine, never hand to OHCI (see §5, decision) |
+
+Of the U-Boot patches, 0001 (DRAM size test) and the SPL half of 0003
+(Falcon) stay; 0002 (`board_usb_init` for DFU) and U-Boot proper are
+dropped. The SPL's GP1 "FLCN" guard keeps working if the firmware clears
+GP1 once it is up (power-tune's job today), but its fallback target
+changes: instead of loading U-Boot proper the SPL returns to the BROM's
+FEL mode, so a firmware that dies *before* clearing GP1 leaves the board
+reachable with `sunxi-fel` from the Mac. As today, a wedge *after* the
+marker is cleared just gets a watchdog reset and a normal boot; a firmware
+that loops through such resets needs its own progress check (§5).
+
+**Robustness.** No scheduler, no page allocator, no `mem_map`, no
+`free_initmem`, no maple tree: the decoded corruption oopses were all in
+kernel bookkeeping that a bare-metal loop does not have. The appliance
+unit's residual fault class (a spilled register coming back wrong; 100/100
+clean boots once the rail was pinned at 1.3 V; the AVCC LDO repair on that
+PCB) does not apply to the stock dev unit, and a firmware that runs one
+core at one clock has no DVFS to provoke it anyway — but keep the SPL's
+DRAM size test and 312 MHz, since the SPL misdetection was a stock-driver
+flake, not a repair artefact. The watchdog is armed by the SPL and must be
+fed from the main loop, and feeding it is not enough: a loop that spins
+happily while USB is wedged needs a progress check (packets or SOFs seen
+within N seconds while a device is bound) that stops feeding. Lost:
+pstore. Replacement: a log ring at a fixed DRAM address (the ramoops
+region `0x4fc00000`) with a version/validity header, written through
+uncached memory, read by the console `log` command and by a recovery
+Linux boot; DRAM retention across a watchdog reset has to be tested, not
+assumed. On the dev unit the UART carries the same log live.
+
+**Power.** Nothing to gain; §10 of DEVELOPMENT.md already showed the CPU
+domain is 35 mW. A WFI main loop is the natural state anyway.
+
+**Size.** 3.66 MB → tens of KB. Matters only through the card read.
+
+**What is lost that matters.** The Linux USB core's handling of every odd
+device behaviour seen so far: the watch's triple enumeration on cradle
+attach, the minnow bootloader not answering string reads, TWRP tearing its
+gadget down on a duplicate SET_CONFIGURATION, the charger-detection
+K-state before a reset, the companion handoff. Each is already documented
+with its fix, but each becomes ours to reproduce in enumeration code,
+along with the unglamorous parts: address allocation, EP0 sizing, reset
+recovery delays, control timeouts, bounds checks on descriptors,
+disconnect during any control stage. Also lost: the root shell, `devmem`,
+`memtester`. `appliance.py` needs a new transport (a small command set
+over the same CDC-ACM interface: `status`, `log`, `fel`, `reboot`,
+`speed`). DFU/U-Boot proper are gone: card updates are `dd` with the card
+pulled (or, later, an MMC write command in the firmware); iterating is
+FEL into RAM.
+
+## 3. The hardware a firmware has to drive
+
+From the 6.6.85 tree in the OrbStack build
+(`tmp/work-shared/orange-pi-zero/kernel-source`): the H3 DT
+(`sunxi-h3-h5.dtsi`), `ccu-sun8i-h3.c`, `phy-sun4i-usb.c`,
+`drivers/usb/musb/sunxi.c`; QEMU's `hw/arm/allwinner-h3.c`; the Allwinner
+H3 datasheet v1.2 for the EHCI/PMU bits. Pin these when implementing —
+QEMU and other people's ports are references, not silicon validation.
+
+| Block | Base | IRQ (GIC SPI / GIC ID) | Clock gate `CCU 0x060` | Reset `CCU 0x2c0` | PHY |
+|---|---|---|---|---|---|
+| musb OTG (gadget to the Mac) | `0x01c19000` (regs 0x400) | 71 / 103 | bit 23 (AHB1) | bit 23 | PHY0 |
+| USB PHY block | `0x01c19400` (ISCR, PHYCTL at +0x10, OTGCTL at +0x20) | — | PHY clocks `CCU 0x0cc` bits 8–11 | PHY resets `0x0cc` bits 0–3 | — |
+| EHCI1 (the watch, USB-A) | `0x01c1b000` | 74 / 106 | bit 25 (AHB2) | bit 25 | PHY1 (PMU regs at `0x01c1b800`) |
+| OHCI1 (companion) | `0x01c1b400` | 75 / 107 | bit 29 (AHB2) + 12 MHz `0x0cc` bit 17 | bit 29 | PHY1 |
+| EHCI0/OHCI0 (PHY0's host side) | `0x01c1a000` / `+0x400` | 72 / 73 | bits 24 / 28 | bits 24 / 28 | PHY0 — keep off; PHY0 is routed to musb |
+| GIC-400 | dist `0x01c81000`, cpu `0x01c82000` | — | — | — | — |
+| Arch timer | 24 MHz, CNTFRQ written by the SPL patch; physical timer PPI 30 | — | — | — | — |
+| Watchdog | `0x01c20ca0` (the SPL patch writes MODE `0x71` for 8 s; keyed restart via CTRL) | — | — | — | — |
+| RTC GP0–GP3 | `0x01f00100`–`0x10c` | — | — | — | — |
+| CCU | `0x01c20000` | — | — | — | — |
+| UART0 | `0x01c28000`, 16550, 115200 — the 3-pin header on a stock Zero; the SPL already prints there | — | APB2 gate `0x06c` bit 16 | `0x2d8` bit 16 | — |
+
+**SRAM** (QEMU `allwinner-h3.c`, matches the linux-sunxi BROM page): A1
+64 KiB at `0x00000000` (the BROM loads at most 32 KiB of SPL into it), C
+44 KiB at `0x00010000` (so A1+C is 108 KiB contiguous), A2 32 KiB at
+`0x00044000` (U-Boot's PSCI monitor lives there when U-Boot proper runs).
+DRAM 256 MiB at `0x40000000` on the appliance unit (512 MiB on a stock
+Zero with the larger chip: do not hardcode; the SPL reports it).
+
+**musb, the sunxi flavour.** Mentor MUSBMHDRC with Allwinner's register
+remap: FIFOs at `0x00 + 4*ep`; the indexed endpoint window at `0x80`
+(TXMAXP/TXCSR/RXMAXP/RXCSR/RXCOUNT, then a 2-byte hole before TXTYPE) —
+INDEX writes must not be interrupted by an ISR that also switches
+endpoints; POWER `0x40`, DEVCTL `0x41`, INDEX `0x42`, VEND0 `0x43` (write
+0 = PIO mode), INTRTX `0x44`, INTRRX `0x46`, INTRTXE `0x48`, INTRRXE `0x4a`,
+INTRUSB `0x4c` (must be written back to clear), INTRUSBE `0x50`, FRAME
+`0x54`, TX/RXFIFOSZ/ADD `0x90`–`0x96`, FADDR `0x98`, CONFIGDATA `0xc0` but
+the H3 has none (`no_configdata`, the driver hardcodes `0xde`), no
+TESTMODE, no ULPI. **4 endpoints each direction + ep0, 8 KiB of FIFO RAM**
+(`ram_bits = 11`; Linux configures 4×512 single-buffered per direction;
+CherryUSB's sunxi table is the same 8192). The fixed gadget needs exactly
+4 TX (adb IN, fastboot IN, ACM data IN, ACM notify IN) and 3 RX, so the
+hardware fits with one RX spare. PIO only (the sunxi DMA is undocumented
+and unused everywhere). FLUSHFIFO on RX is only valid with RXPKTRDY set —
+the bug that cost weeks in MUSB-BULK-OUT.md. Linux never sets the
+double-packet buffer bit on sunxi and nobody has written down why: ship
+single-buffered, try DPB on the adb pair only after the baseline works.
+
+**EHCI1.** A standard EHCI (QEMU emulates it with the generic model) behind
+Allwinner's PMU wrapper: HCI_ICR at `+0x800` — write `0x701` = AHB INCR8
+(bit 10) + INCR4 (bit 9) + INCRX align (bit 8) + ULPI bypass (bit 0),
+what Linux and uli's firmware both write; bit 11 (INCR16) stays clear —
+and PHY_CTL at `+0x810` (clear SIDDQ, bit 1 on the H3). The PHY itself
+needs the 45 Ω calibration, TX amplitude `0x14` and disconnect threshold
+`3` bit-banged through PHYCTL (`sun4i_usb_phy_write`, offsets `0x0c`,
+`0x20`, `0x2a`) — copy the Linux sequence. Program USBCMD's Interrupt
+Threshold Control to 1 microframe before run (default 8 = 1 ms). Set
+CONFIGFLAG so ports route to EHCI. Companion OHCI1 at `+0x400` is a
+standard OHCI; only needed if a full-speed device must ever be bridged
+(decision in §5), and adding it later is stack-level work (port
+ownership, two controllers in one stack), not just a driver.
+
+**Entry state.** The SPL jumps with the MMU and caches off (U-Boot's
+`cleanup_before_linux`), in secure SVC, cpu0 only, PLL1 at the SPL's
+default (1008 MHz on H3; drop to 816 or 648 — the rail is 1.3 V either
+way), DRAM at 312 MHz, the watchdog already running with 8 s, GP1 = `FLCN`,
+r2 = the DTB address (ignored). The firmware's first instructions: feed the
+watchdog, write GP2 with its own stamp, bring up UART0 and print, install
+the vector table and exception-mode stacks with a fault handler that
+prints and writes the fault into the log ring and GP3, set up a flat 1:1
+page table (16 KiB, TTBCR N=0 — DRAM sits at exactly 1 GiB, so a 4 KiB
+N=2 table would push it into TTBR1), D-cache on for code/data, one
+uncached (or write-through + explicit maintenance) section for EHCI's
+QH/qTD pool and the bulk buffers, GIC with the three IRQs unmasked.
+
+## 4. Software stacks, compared
+
+| | TinyUSB | CherryUSB | U-Boot drivers as a runtime | From scratch | Zephyr |
+|---|---|---|---|---|---|
+| License | MIT | Apache-2.0 | GPL-2.0+ | — | Apache-2.0 |
+| musb device for sunxi | `dcd_sunxi_musb.c` (F1C100s; ~1000 lines; PIO; forced ID/VBUS; HS; F1C100s clock/PHY/IRQ code to replace; assumes 4 KiB FIFO RAM → 8 KiB here) | `usb_dc_musb.c` with `CONFIG_USB_MUSB_SUNXI`: the exact H3 offsets (POWER 0x40 … indexed window 0x80, FIFO cfg 0x90) + `usb_glue_sunxi.c` (4 EP, 8 KiB table) | `musb-new/sunxi.c` + gadget core, proven on this board by the DFU path | the two Linux drivers we already patched are the spec | none |
+| EHCI host | `ehci.c`: async + periodic, `hcd_edpt_open/xfer`, has run on H3 EHCI (uli/allwinner-bare-metal, 3 controllers, HID + MSC, IRQ driven). Adaptation needed: NXP-specific port-speed bits and TT register, CONFIGFLAG not set, interrupt threshold left at default, **one transfer per endpoint at a time (one qTD)**, cache hooks to fill in, no barriers | `usb_hc_ehci.c` + OHCI companion option; URB queue per endpoint; Allwinner T113 glue has the same 0x800/0x810/OTGCTL sequence as the H3 | `ehci-sunxi.c` but the API is synchronous (`submit_bulk_msg` blocks up to 5 s): unusable for a two-way proxy without rewriting it | EHCI async list only, ~800 lines — but EP0, enumeration, disconnect recovery and cancellation are the bulk of the work, not the schedule | no EHCI in Zephyr's UHC |
+| Raw endpoint host API | `tuh_edpt_open` / `tuh_edpt_xfer` (`CFG_TUH_API_EDPT_XFER`, since 0.14) | URB API, async with callback, zero copy | — | — | — |
+| OS requirement | none: `tud_task()` / `tuh_task()` in a superloop, IRQs feed queues; completions are *deferred* to the task, so loop dispatch latency is part of the datapath | **host stack needs an RTOS**: `usbh_hub.c` creates a thread, a semaphore and a message queue unconditionally; osal ports are FreeRTOS/RT-Thread/ThreadX/NuttX/Zephyr/LiteOS-M only | none | none | is the RTOS |
+| H3 specifics | nothing (port the F1C100s init) | README claims "AllwinnerTech: all except F1C/F2C (musb + EHCI + OHCI)" but `port/sunxi/` says "get source from official SDK" | board support complete | — | `opi_zero/sun8i_h3` board: UART, GIC, arch timer only; "Not actively maintained"; loaded by U-Boot `go 0x40000000` |
+
+Not candidates: RT-Thread (Allwinner D1/F1C only), NuttX (no H3), xboot (no
+H3 USB). uli/allwinner-bare-metal (MIT) is worth mining for its H3 EHCI
+bring-up (`usb.c`: gates off → 10 ms → on, "helps with devices not
+connecting on boot"), its boot/MMU/GIC/UART code, and as proof that *its*
+port of TinyUSB's EHCI driver works on this silicon.
+
+**Why TinyUSB first, and why CherryUSB stays on the table.** CherryUSB's
+drivers are the better fit on paper (explicit sunxi register map,
+Allwinner EHCI glue, a URB queue that maps 1:1 onto a proxy), but its host
+stack is thread-based; the choice would be FreeRTOS on a Cortex-A7/GIC
+port or a fake osal, both their own bring-up. TinyUSB runs as a superloop
+with IRQ-fed queues. "No scheduler" does not by itself mean lower latency
+— TinyUSB defers completion handling to the task, and an RTOS context
+switch is tens of microseconds, not a millisecond — so the spike measures
+the completion→rearm path on TinyUSB first and switches to CherryUSB +
+FreeRTOS if that is where the time goes. From scratch is rejected as the
+default: a restricted async EHCI schedule is compact, but EP0,
+enumeration, disconnect recovery and gadget state are the larger part and
+both stacks have them. Pin the stack commit.
+
+## 5. Design sketch (what "usbproxy-bm" would be)
+
+- **Boot.** Falcon payload at sector 0x18800, same `mkimage` wrapper the
+  SPL already accepts. The SPL is the whole bootloader: U-Boot proper, DFU
+  and the FAT partition are dropped from the card (the SPL's fallback for
+  a bad image or GP1 = "last boot died" becomes a jump to FEL). First
+  thing after entry: feed the watchdog, stamp GP2, clear GP1 once the
+  gadget is attached (the "boot reached userspace" meaning today).
+- **Dev loop and recovery = FEL + UART.** `sunxi-fel spl sunxi-spl.bin`
+  (the SPL inits DRAM and returns to FEL — stock U-Boot behaviour),
+  `sunxi-fel write 0x40008000 fw.bin` + `exe`: a new firmware runs from
+  RAM in seconds with no card writes, over the same OTG port the gadget
+  uses. Entry into FEL without a button: card out (the BROM falls through
+  to FEL), or the SPL jumping to the BROM FEL entry on an RTC flag (§7.1).
+  Card writes only for a release: `dd` with the card pulled. The UART
+  header carries the firmware's log and a fault dump throughout.
+- **Runtime.** One core, no DVFS, flat MMU map with D-cache, GIC with
+  three IRQs (musb ID 103, EHCI1 ID 106, physical timer PPI 30), a 1 ms
+  tick for timeouts only — never as the datapath's polling interval — and
+  a superloop: `tud_task(); tuh_task(); bridge_poll();` then WFI only when
+  nothing is pending (race-free: check with IRQs masked). Watchdog fed
+  from the loop *and* gated on a progress check. Log ring in DRAM at the
+  old ramoops address, versioned header, uncached writes, mirrored to the
+  UART.
+- **Gadget.** Same descriptors as today (`USBPROXY01`, same VID/PID/serial,
+  adb + fastboot + CDC-ACM) so the Mac's cached device object stays valid.
+  Console: not a shell, a command set (`status` = link speed, bound slots,
+  uptime, counters; `log`; `fel` = RTC flag + watchdog reset into FEL;
+  `reboot`; `speed`), the same command set on the UART. `appliance.py
+  check/swap/soak` get a transport for it. Upstream (Mac) and downstream
+  (watch) state machines are separate: a Mac reset, SET_CONFIGURATION or
+  halt-clear resets local upstream state (toggles, pending transfers) and
+  never touches the watch.
+- **Host side.** Enumerate whatever appears on EHCI1: GET_DESCRIPTOR
+  device/config only (never strings), SET_CONFIGURATION once, find the
+  ff/42/01 and ff/42/03 bulk pairs, bind them to the slots. Settle 1 s
+  before binding a device that appeared after boot. Port reset policy: a
+  timed state machine — chirp, and on "not high speed after reset" retry
+  with backoff indefinitely, cancel on disconnect, report the state in
+  `status`; **never hand to OHCI** (decision: the only devices this
+  appliance bridges are HS; a genuine FS device would then never
+  enumerate, which is acceptable and removes the whole 0012 patch class).
+- **Datapath.** Gadget-side bulk OUT is read **per packet** (512 B
+  transfers), so a fastboot download whose tail is full packets with no
+  ZLP can never strand a buffer — the sizing logic is only unnecessary
+  under that rule; a 4 KiB gadget read would wait forever on exactly the
+  tail MUSB-BULK-OUT.md §7b describes. Each packet is forwarded to the
+  watch's bulk OUT as its own transfer. With TinyUSB's one transfer per
+  endpoint that means one completion→resubmit per 512 B packet on the
+  host side; if M3 shows that gap dominates, the HCD gets a small qTD
+  queue (or the firmware batches per adb message using the header length
+  it already parses for framing). Per slot one bulk IN transfer pending
+  on the watch (4 KiB), completions go to the musb TX FIFO; ZLPs and
+  short packets forwarded as-is. On unbind: drain pending IN data to the
+  Mac for ~300 ms first (fastboot's OKAY arrives just before the device
+  vanishes), then cancel every host transfer, wait for the async-advance
+  doorbell, retire the QHs and reject stale completions before the slot
+  can bind again — ring and address reuse right after a detach is unsafe.
+  Single-buffered musb FIFOs first. The ack accelerator is not ported; if
+  M3 shows the cycle did not fall, it can be ported later as it is pure
+  adb-stream logic.
+- **Bridge semantics ported 1:1 from bridge.cpp:** idle slot NAKs IN and
+  drains OUT (CNXN captured, everything else dropped), IN halt pulse on
+  adb unbind, fastboot never halted, host→device framing across binds,
+  CNXN capture/replay with checksum check, SET_FEATURE halts honoured and
+  idempotent.
+
+## 6. Variants considered and parked
+
+- **SRAM-only firmware (no U-Boot at all).** Own eGON boot0, no DRAM
+  init, firmware in the 108 KiB of contiguous SRAM. Removes most of the
+  SPL's ~0.11 s of retained work and the DRAM flakiness class entirely,
+  and the SPL's DRAM code is the only thing the SPL still contributes.
+  But the BROM loads at most 32 KiB, so it needs either a ≤32 KiB firmware
+  or a second stage with its own MMC read driver; the MMU can stay on
+  with a 16 KiB page table in SRAM, but fit, DMA reachability and the
+  loader are all unproven. Parked for sequencing only: nothing in M1–M3
+  depends on it, so get the cycle number on the SPL route first, then
+  decide whether to drop DRAM. **Replacing the SPL later is cheap either
+  way**: it is only "DRAM init, read sectors, jump", the payload is a
+  plain `mkimage` legacy header a new boot0 can keep loading from sector
+  0x18800, and the GP1/RTC-stamp logic is ~20 lines. Own-boot0-with-DRAM
+  = U-Boot's `dram_sunxi_dw.c` + H3 tables + our size test (~1200 lines,
+  GPL) plus a PIO MMC read; own-boot0-without-DRAM = the SRAM variant.
+  The one decision to take now so that the SRAM variant stays open: keep
+  the firmware's RAM footprint under ~70 KiB (EHCI pool, rings, no large
+  log ring) and put DRAM addresses only in the linker script.
+- **U-Boot proper as the runtime.** Its musb gadget is proven here, but its
+  host stack is synchronous; writing an async EHCI path inside U-Boot is
+  the same work as the bare-metal one with a worse build system.
+- **Zephyr.** Gives threads, GIC, timer and a UART driver on this exact
+  board, but every USB driver would still be ours and the board port is
+  unmaintained. Only worth it if the superloop turns out not to be enough
+  — and then CherryUSB + FreeRTOS is the shorter route.
+
+## 7. Risks and unknowns
+
+1. **Debug access.** The stock dev unit has the UART header, so the
+   firmware prints from its first instruction and the SPL's own banner
+   proves the cable before any firmware exists. FEL is still the dev
+   loop: the SPL can jump to the BROM's FEL entry on an RTC flag (the
+   same trick as `DFU1`; a SUSE U-Boot patch does exactly this for the H3
+   with entry `0xffff0020` — verify against the BROM before relying on
+   it), after which `sunxi-fel write/exe/read` from the Mac over the OTG
+   port loads code and dumps memory with no card writes. When the
+   firmware later moves to the appliance unit (no UART), the CDC console
+   and the log ring are all there is — keep both first-class from M1.
+2. **The thesis may be wrong.** The direct 0.45 ms is a baseline, not the
+   bridge's floor: a second bus, serialization, two independently phased
+   host schedules, EHCI's interrupt threshold, TinyUSB's deferred
+   completions and the per-packet host resubmit all sit between. If the
+   cycle stays ~0.8–1 ms, throughput stays ~4 MB/s without the
+   accelerator and the port bought boot time and a small image. M-1 and
+   M3 are the go/no-go.
+3. **musb PIO service cost on a Cortex-A7.** ~17,600 packet services/s at
+   9 MB/s, each an IRQ plus device-memory register traffic. Measure the
+   whole service (IRQ → copy → rearm) and IRQ occupancy at M1 with a
+   loopback, not just a 512 B copy.
+4. **Enumeration corner cases are ours now**: triple enumeration on cradle
+   attach, bootloader string timeouts, the cold-boot chirp miss, the
+   charger K-state, macOS's stale device object (keep ≥1 s D+ low between
+   attaches), disconnect in any control stage. Each is documented in
+   DEVELOPMENT.md with its rule.
+5. **Detach is a DMA-lifetime problem** (§5): stale EHCI completions,
+   half-retired QHs and old-device data leaking into a new binding are the
+   bugs a superloop makes easy to write.
+6. **Recovery cannot depend on CDC working**: a wedged USB stack with a
+   fed watchdog is a brick until power-cycle. The progress check (§5) and
+   the FEL path are the mitigation; both need a deliberate test.
+7. **Two boards, two behaviours.** The dev unit is stock; the appliance
+   unit is repaired (AVCC via a bodged LDO, header-powered) and 256 MiB.
+   Whatever passes on the dev unit has to be soaked on the appliance unit
+   before it is trusted there, and the DRAM size must come from the SPL,
+   not a constant.
+8. **Double buffering on sunxi musb is untested anywhere we know of.**
+   Single-buffered first.
+9. **Operator tooling** (`appliance.py`, the appliance skill, the soak
+   harness) needs a new transport; budget a week.
+
+## 8. Milestones (each ends with a number)
+
+| | Scope | Proves | Time |
+|---|---|---|---|
+| M-1 | No code. On the current appliance with `adb_ack_accel: false`: paired direct / appliance runs of uncompressed random push and pull to tmpfs, md5 both sides, with and without concurrent `adb shell` traffic; `[uptime]`-stamp the proxy's receive→submit and completion→write gaps so the ~1 ms cycle is split into kernel, proxy and watch shares | where the time goes today; whether a cheaper Linux-side change recovers most of it; the baseline M3 is compared against | 1 day |
+| M0 | On the stock dev unit with the UART attached: FEL recovery proven first (known-good Linux card image kept; SPL fallback retargeted from U-Boot proper to FEL; `sunxi-fel` round trip from the Mac). Then a Falcon payload with UART printf, vector table, exception stacks and fault capture into GP3, MMU + caches, GIC + timer, LED blink, GP2 stamp, GP1 clear, watchdog feed — and deliberate failure tests (hang before the GP1 clear → FEL; hang after → watchdog reboot) | the SPL → firmware path, the FEL dev loop, the GP1 fallback and the runtime skeleton | 2–4 days |
+| M1 | musb device via TinyUSB `dcd_sunxi_musb` ported to the H3 (clocks/PHY/IRQ, 8 KiB FIFO, 4 EP): the fixed gadget enumerates on the Mac with the CDC-ACM console echoing, **plus** a bulk loopback endpoint pair driven from the Mac with pyusb: full packets, short packets, ZLPs, sustained duplex; IRQ occupancy and per-packet service time from the physical counter | the gadget and the PIO budget (§7.3) | 1 week |
+| M2 | EHCI1 host via TinyUSB `ehci.c` adapted to the H3 (ICR/PHY, ITC = 1, CONFIGFLAG, cache hooks): enumerate the watch on a cold boot with it cradled, HS reset-retry state machine, link speed in `status`; bulk transfers to/from the watch's adb endpoints, cancellation and clean disconnect mid-transfer | host side works and can be torn down | 1–1.5 weeks |
+| M3 | Clean-session bridge on the adb slot only (no replay, no mode switches); the M-1 experiment repeated on the prototype, plus physical-counter stamps at musb RX, EHCI submit, EHCI completion, musb TX and loop dispatch, recorded as distributions | **go/no-go**: mean 4096-byte WRTE→OKAY cycle approaching 0.5 ms (≥8 MB/s with no accelerator) → continue; ~0.8–1 ms → stop | 1–2 weeks |
+| M4a | Parity: fastboot slot, bind/unbind with drain and cancellation, idle sink, CNXN replay/framing, halt pulse, settle, log ring, console commands, `appliance.py` transport | feature parity | 3–4 weeks |
+| M4b | Fault injection and soak: unplug mid-header/mid-payload, adb↔fastboot↔TWRP cycles, fastboot OKAY→disconnect, Mac sleep/resume and reset, long idle → rebind, simultaneous push/pull, 100 warm + 20 cold boots — on the dev unit, then repeated on the appliance unit | ships | 2–3 weeks |
+
+Total: ~4 weeks to the go/no-go, 8–12+ weeks to parity.
+
+## 8a. M-1 results (2026-10-09, appliance unit, Hoki watch at 480 Mb/s)
+
+`usb-proxy --cycle_trace` (trace.cpp, opt-in, 50 µs bins, paired per stream
+pair) swapped into the running appliance, `adb_ack_accel: false`, 20 MB
+random pushes/pulls to a tmpfs on the watch via `scripts/cycle-bench.py`,
+md5-exact every run. Logs: `~/.cache/appliance/m-1-*.log`, rows in
+`~/.cache/appliance/cycle-bench.tsv`. The watch's idle load average is ~2.3
+(its normal state, not "busy").
+
+| Run | push MB/s | pull MB/s | push cycle | pull cycle |
+|---|---|---|---|---|
+| accel on (reference, loop device for /tmp) | 7.4 (5.8/8.3/8.1) | 6.2 | ~0.55 ms | ~0.66 ms |
+| accel off, 16-packet gadget reads | 3.60 | 1.47 | 0.94–0.98 ms | 2.37–2.45 ms |
+| accel off, 1-packet gadget reads | 3.57 | 1.50 | 0.99–1.07 ms | 2.15–2.38 ms |
+| accel off, 16-packet, concurrent `adb shell` loop | 3.80 | 1.50 | 0.92–0.94 ms | 2.1–2.4 ms |
+| direct (watch on the Mac, tmpfs) | 7.77 (7.1/8.0/8.2) | 7.20 | 0.50–0.58 ms | 0.56–0.58 ms |
+| direct, concurrent `adb shell` loop | 7.97 | 7.17 | ~0.51 ms | ~0.57 ms |
+
+**What M-1 says (2026-10-09).** The direct cycle on this Mac/watch pair is
+~0.52 ms push / 0.57 ms pull (the 0.45 ms in older notes was a different
+session), i.e. the watch itself tops out near 8 MB/s. The appliance with the
+accelerator on already sits within ~10 % of that (7.4 / 6.2 MB/s). With the
+accelerator off the proxy+kernel path adds **~0.43 ms per push cycle** (0.95
+vs 0.52) and **~1.8 ms per pull cycle** (2.4 vs 0.57, the sync one-packet IN
+reads). A bare-metal datapath therefore has ~0.4 ms per cycle to remove on
+push and would have to get its own cost under ~0.05–0.1 ms to reach parity
+with direct; the split below says where the 0.4 ms sits (two user-space hops
+~110 µs, usbfs/EHCI/libusb ~150 µs, the single-buffered OUT re-arm and PIO
+stalls ~150–200 µs). Honest framing for the M3 gate: the *throughput* gain
+over today's shipping appliance (accelerator on) is at most ~10–15 %; what
+the port buys is reaching that number without the ACK-spoofing accelerator
+and the same rate on pull as on push. The gate stays as written (mean
+4096-byte cycle approaching 0.5 ms with no accelerator), now anchored to the
+measured 0.52 ms direct.
+
+**Push cycle split (accel off, 16-packet reads, p50 of 1024 cycles):**
+
+| Gap | µs | What it is |
+|---|---|---|
+| WRTE header read → payload read done | 325 | the Mac's header→payload URB gap **plus** the gadget side: single-buffered RX FIFO, the proxy re-arming the OUT read, musb PIO per packet; bus time for 4 KB at HS is ~70 µs |
+| payload done → libusb submit | 25–40 | proxy user space |
+| submit → completion callback | 225 | usbfs + EHCI schedule + IRQ + libusb event thread; ~70 µs of it is bus |
+| completion → OKAY read from the watch | 275–325 | the watch's turnaround + its 24-byte IN + a blocking libusb read returning |
+| OKAY read → OKAY written to the gadget | 75–125 | proxy handoff to the write thread + raw-gadget write |
+| OKAY out → next WRTE header | 125 | the Mac |
+
+Reading: of ~950 µs, the Mac's own gaps are ≥ ~250 µs (125 after the OKAY
+plus an unknown part of the 325), the watch ~250–300 µs, and the
+proxy+kernel path ~400–500 µs (the re-arm/PIO part of the first gap, the
+~150 µs of non-bus time in submit→complete, and the two user-space hops).
+That is the share a bare-metal datapath can attack; the direct run bounds
+the Mac+watch share from the other side.
+
+**Pull cycle split:** 2.0 ms of the 2.4 ms is "WRTE header → payload read
+done": with the accelerator off the IN path is one blocking libusb read per
+512-byte packet (~250 µs each × 8). The accelerator's sized reads are what
+make pull usable today; a bare-metal IN path (one 4 KB transfer pending)
+removes this entirely, so pull should match push there. The remaining pull
+gaps: payload → gadget write 75–125 µs, host OKAY read 175 µs after it,
+OKAY submit+complete to the watch 25–75 µs, watch's next header 275 µs.
+
+**1-packet reads** (the shape closest to the bare-metal per-packet OUT
+path) cost ~100 µs more on push (header→payload 475–550 µs): eight
+raw-gadget reads and eight async submits instead of one each. In the
+firmware the per-packet work is an ISR copy and a qTD, not a syscall pair,
+so this is not predictive, but it says per-packet handling must be cheap.
+
+**Trace caveat:** the `submit→complete` mean occasionally shows a huge
+outlier (a stale stamp when a WRTE's payload-done event was not paired);
+use p50/p90. Fix pending in trace.cpp.
+
+## 8b. M0/M1 bring-up log (2026-10-09/10, stock Zero, 256 MiB)
+
+- **Dev loop works as planned**: card = appliance wic with sector 0x18800
+  zeroed (done from U-Boot: `mw.b` + `mmc write`), SPL → "Expected image is
+  not found" → U-Boot proper, `appliance.py bm run fw.bin` = key-spam catch
+  + `loady 0x40008000 750000` (24 KB in ~1 s) + `go`. The appliance kernel
+  has no UART driver, so `ub_catch_prompt` now reboots it over the USB
+  console when the dongle is silent.
+- **Set/way clean does not land the image in DRAM on this A7.** After
+  `loady` the image sits dirty in U-Boot's D-cache; a textbook DCCISW
+  set/way pass over CLIDR LoC (both levels) followed by caches-off left DRAM
+  holding the *previous* build beyond the first few hundred bytes (read back
+  with the caches off: `0x447e684c` where `e59f31b8` belonged), so `bl main`
+  jumped into stale code. A DCCIMVAC clean-by-address over the image range
+  before the caches go off fixes it; both are kept in `start.S`. The
+  invalidate-only set/way pass with the caches already off hung the core
+  and was dropped (one clean+invalidate pass is enough).
+- **DesignWare UART LCR**: a write while USR.busy is ignored and can leave
+  DLAB set (output died after `uart_init`); `uart_init` now drains and
+  retries LCR until it reads back (Linux `dw8250_check_lcr`).
+- **Secure-state timer**: in secure PL1 the CNTP_* registers drive the
+  secure physical timer, PPI 29 (not 30). Both enabled.
+- **M1 on the first run**: TinyUSB `dcd_sunxi_musb` forked for the H3 (base
+  0x01c19000, CCU bits 23/8, 8 KiB FIFO, no SRAMC, PHY0 route via OTGCTL,
+  SIDDQ clear in PMU0) enumerated on the Mac at high speed straight away:
+  `/dev/cu.usbmodemUSBPROXYBM1`, `adb devices` → `USBPROXYBM offline`, the
+  idle adb slot received adb's 310-byte CNXN, the CDC console answers
+  `status`. Firmware 24 KB.
+- **M1 exit (tools/loopback.py, adb stopped, pyusb on the adb slot):** full
+  512-byte packets, 1/7/64/511-byte short packets and a zero-length packet
+  all echo exactly; 5000 × 512 B ping-pong, 0 mismatches, md5-exact,
+  **181–189 µs per host→firmware→host round trip** (2.7–2.8 MB/s each way in
+  strict ping-pong, i.e. with the Mac's synchronous libusb turnaround in
+  every cycle). OUT flood with the loopback off: **17.6 MB/s, 27.7 µs per
+  packet at the gadget, 16384/16384 packets counted** — the ISR → `tud_task`
+  → re-arm handoff on a single-buffered FIFO; twice the 8 MB/s the watch
+  path needs, so good enough for M3, with re-arming from the ISR and the
+  double-packet buffer as the known next steps if the M3 split says so.
+  Found en route: upstream `dcd_sunxi_musb.c` never sends a zero-length IN
+  transfer (returns "complete" without TXPKTRDY); fixed in the fork.
+
+## 9. Codex review (2026-10-09), triaged
+
+Prompted with the whole document and read-only access to both repos; it
+also web-checked the H3 datasheet, TinyUSB and CherryUSB sources. Verdict
+on each point; "fixed" means the sections above now say so. The review
+predates the decision to use a stock dev unit with a UART, which removes
+its "inaccessible, repaired unit" caveat from the effort estimate but
+changes nothing else.
+
+| Codex finding | Verdict |
+|---|---|
+| TTBCR N=2 cannot map DRAM: 1 GiB is exactly where TTBR1 starts | Agree, fixed (N=0, 16 KiB) |
+| HCI_ICR `0x701` is INCR8/INCR4/INCRX-align/ULPI bypass; INCR16 is bit 11 and stays clear | Agree, fixed |
+| TinyUSB `ehci.c` is more than "add barriers": NXP speed bits and TT register, CONFIGFLAG not set, external H3 port proves only itself | Agree, fixed in §4 |
+| TinyUSB runs one transfer per endpoint (one qTD); "chained qTDs"/queued packets need HCD changes | Agree, §5 datapath rewritten around it |
+| Fastboot tail sizing is only unnecessary with packet-level gadget reads; a 4 KiB read stalls on a full-packet tail regardless of raw-gadget | Agree, fixed (per-packet reads are now a stated rule) |
+| 1.3 ms RTT ↔ 1.3 MB/s mixes baselines: 1.3 ms predicts 3.15 MB/s; the current unaccelerated cycle is ~1 ms | Agree, numbers corrected throughout |
+| Boot arithmetic double-counted the 0.19 s card read; retained SPL work is ~0.11 s; warm reboot ≠ cold power-on | Agree, fixed |
+| GP1 guard only covers failure before the marker is cleared; WDT mode value is `0x71` in the patch | Agree, fixed; progress check added |
+| "Hardware fault, stays" is more certain than the evidence (cold soak still owed) | Agree, softened; moot on the stock dev unit |
+| 12 patches, not 13; "a few lines each" ignores enumeration/DMA/sequencing work | Agree, fixed |
+| GIC IDs are SPI+32 (103/106), the sketch used DT indices | Agree, fixed |
+| Direct RTT is a baseline, not the bridge's floor; push and pull need separate models | Agree, §2/§7 reworded |
+| Legacy adb bounds one stream, not the transport; `4096/cycle` is an approximate ceiling | Agree, reworded |
+| EHCI can do several bulk transactions per microframe; "one microframe per hop" is not a bound | Agree, reworded |
+| **EHCI Interrupt Threshold Control defaults to 8 µframes = 1 ms on the H3; TinyUSB leaves it; must set 1** | Agree — the most useful single catch; in §2, §3, §5, M2 |
+| PIO cost is the whole service (~17,600/s at 9 MB/s), not a 512 B copy | Agree, §2/§7/M1 |
+| TinyUSB defers completions to the task; the 1 ms tick must not become the polling interval | Agree, §5 |
+| M3 experiment design: paired runs, physical-counter stamps, distributions, a bulk responder to separate watch turnaround | Agree, adopted as M-1/M3 |
+| Missing parity: idle OUT sink, IN drain before detach, DMA lifetime on detach, packet semantics, separate up/downstream state machines, enumeration details, CPU runtime work, recovery independent of CDC, log persistence design, transition tests | Agree on all; §1, §3, §5, §7, M0/M4b |
+| CherryUSB + RTOS should stay a serious alternative; an RTOS is not a millisecond penalty | Agree, §4 reworded |
+| OHCI later is stack-level work, not a driver drop-in | Agree, §3 |
+| 4–8 weeks is optimistic; 8–12+ for parity; split M4; M0 needs the runtime skeleton and failure tests; M1 needs a bulk benchmark; M2 needs transfers and cancellation; prove recovery before M0 | Agree, §8 rewritten |
+| Measure the current Linux path without acceleration first | Agree — it is now M-1 and the first thing to do |
+| Single-buffered FIFOs first; timed retry state machine; pin stack commits; "no ACK spoofing" rather than "no adb parsing"; SRAM-only does not require MMU off | Agree, all fixed |
+| "Do not use the identical raw+FAT payload workflow for experiments" | Moot: DFU, U-Boot proper and the FAT partition are out of scope now |
+
+Codex's verdict, which I share: a bounded spike, not a committed
+replacement; boot and image-size savings do not justify owning both USB
+stacks and all recovery behaviour. The deciding measurement is the mean
+end-to-end 4096-byte WRTE→OKAY cycle on the real watch with acceleration
+off, paired direct vs prototype: approaching 0.5 ms → proceed toward
+8 MB/s parity; ~0.8–1 ms → stop.
+
+## Sources
+
+- TinyUSB: [PR #1220, F1C100s DCD](https://github.com/hathach/tinyusb/pull/1220),
+  [`dcd_sunxi_musb.c`](https://github.com/hathach/tinyusb/blob/master/src/portable/sunxi/dcd_sunxi_musb.c),
+  [`ehci.c`](https://github.com/hathach/tinyusb/blob/master/src/portable/ehci/ehci.c),
+  [`usbh.c`](https://github.com/hathach/tinyusb/blob/master/src/host/usbh.c),
+  [0.14.0 release notes (tuh_edpt_xfer)](https://github.com/hathach/tinyusb/releases),
+  [discussion #1599 (EHCI portability)](https://github.com/hathach/tinyusb/discussions/1599)
+- CherryUSB: [`port/musb/usb_dc_musb.c`](https://github.com/cherry-embedded/CherryUSB/blob/master/port/musb/usb_dc_musb.c),
+  [`port/musb/usb_glue_sunxi.c`](https://github.com/cherry-embedded/CherryUSB/blob/master/port/musb/usb_glue_sunxi.c),
+  [`port/ehci/usb_glue_t113.c`](https://github.com/cherry-embedded/CherryUSB/blob/master/port/ehci/usb_glue_t113.c),
+  [`class/hub/usbh_hub.c`](https://github.com/cherry-embedded/CherryUSB/blob/master/class/hub/usbh_hub.c),
+  [`osal/`](https://github.com/cherry-embedded/CherryUSB/tree/master/osal)
+- Allwinner H3 datasheet v1.2: [EHCI USBCMD / interrupt threshold p. 493, HCI_ICR p. 521](https://cdn.hackaday.io/files/1872678012031328/Allwinner_H3_Datasheet_V1.2.pdf)
+- EHCI spec §§4.8–4.9: [Intel EHCI specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/ehci-specification-for-usb.pdf)
+- ARM short-descriptor TTBR0/TTBR1 selection: [ARM DDI 0406C](https://support.arm.com/documentation/ddi0406/c/)
+- adb: [legacy protocol](https://android.googlesource.com/platform/system/core/+/de980f27a701eb8f7130218f9bac768fe7155d30/adb/protocol.txt),
+  [zero-length packets and USB completion](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/zero_length_packet.md)
+- H3 bare metal: [uli/allwinner-bare-metal](https://github.com/uli/allwinner-bare-metal) (`jh` branch `usb.c`),
+  [mprymek/allwinner-baremetal](https://github.com/mprymek/allwinner-baremetal),
+  [trebisky/orangepi](https://github.com/trebisky/orangepi)
+- Memory map: [QEMU `hw/arm/allwinner-h3.c`](https://github.com/qemu/qemu/blob/master/hw/arm/allwinner-h3.c),
+  [linux-sunxi BROM](https://linux-sunxi.org/BROM)
+- FEL re-entry from the SPL: [U-Boot `rbrom` patch (SUSE)](https://sources.suse.com/SUSE:SLFO:Products:SLES:16.0/000productcompose/0b9fffee43a59e7b8a19200fe73bb1bf/INCLUDED/SUSE:SLFO:1.2::u-boot::ce5513236e72d322942ccc1396c2a207/0016-cmd-boot-add-brom-cmd-to-reboot-to-.patch),
+  [sunxi: Normalise FEL support](https://lists.denx.de/pipermail/u-boot/2015-February/204447.html)
+- Zephyr: [Orange Pi Zero board](https://docs.zephyrproject.org/latest/boards/xunlong/opi_zero/doc/index.html)
+- Local: `drivers/usb/musb/sunxi.c`, `drivers/phy/allwinner/phy-sun4i-usb.c`,
+  `drivers/clk/sunxi-ng/ccu-sun8i-h3.c`, `arch/arm/boot/dts/allwinner/sunxi-h3-h5.dtsi`
+  in the 6.6.85 kernel-source of the OrbStack build; DEVELOPMENT.md §8–§10; MUSB-BULK-OUT.md.

@@ -197,8 +197,24 @@ def ub_catch_prompt(ser, timeout=30):
     ser.reset_input_buffer()
     ser.write(b"\n")
     ser.flush()
-    if "=>" in drain(ser, 1.0)[-300:]:
+    first = drain(ser, 1.0)[-300:]
+    if "=>" in first:
         ser.write(b"reset\n")
+    elif "bm> " in first:
+        # usbproxy-bm: `uboot` sets the SPL's FLCN guard and watchdog-resets,
+        # so the SPL takes the "last Falcon boot died" path to U-Boot proper.
+        ser.write(b"uboot\n")
+    elif not first.strip() and not node_is_usb_console() and console_nodes():
+        # Silent UART with a USB console present: the appliance kernel has no
+        # UART driver, so Linux cannot be told to reboot over the dongle. Ask
+        # it over the USB console instead, then catch the prompt here.
+        other = serial.Serial(console_nodes()[0], BAUD, timeout=0.05)
+        try:
+            lx_login(other)
+            other.write(b"devmem 0x01f00104 32 0x464c434e; reboot -f\n")  # GP1=FLCN: U-Boot proper
+            other.flush()
+        finally:
+            other.close()
     else:
         # Get a verified shell first. Typing `reboot -f` a fixed delay after
         # `root` at a login prompt is a race: login flushes the tty while it
@@ -404,7 +420,8 @@ def ub_loady(ser, addr, data, name, baud=None, progress=print):
 # --------------------------------------------------------------------------- #
 # Watching a boot
 # --------------------------------------------------------------------------- #
-BOOT_STOPS = [b" login:", b"Rebooting in", b"=>"]
+BM_PROMPT = b"bm> "   # the bare-metal firmware's console (usbproxy-bm)
+BOOT_STOPS = [b" login:", b"Rebooting in", b"=>", BM_PROMPT]
 
 
 def watch_boot(ser, timeout=60, log=None):
@@ -427,6 +444,9 @@ def boot_report(text):
         "uboot_proper": "SPL: U-Boot" in text or bool(re.search(r"^U-Boot 20\d\d", text, re.M)),
         "oops": bool(re.search(r"Kernel panic|Oops|Rebooting in", text)),
         "login": " login:" in text,
+        # usbproxy-bm (bare-metal firmware) banner and prompt
+        "bm_banner": "usbproxy-bm " in text,
+        "bm_prompt": "bm> " in text,
     }
     m2 = re.search(r"PC is at ([^\n]+)", text)
     m3 = re.search(r"Comm: (\S+)", text)
@@ -608,3 +628,53 @@ def parse_buildinfo(text):
         else:
             info[k] = v
     return info
+
+
+# --------------------------------------------------------------------------- #
+# usbproxy-bm: the bare-metal firmware's console (same node as the UART getty,
+# later also the gadget's CDC-ACM). A fixed command set, `bm> ` prompt, and
+# `status` printing key=value lines. See ~/Downloads/usbproxy-bm.
+# --------------------------------------------------------------------------- #
+def bm_run(ser, cmd, timeout=3.0):
+    """Type one firmware command and return its output (echo and prompt
+    stripped). Exits if the prompt does not come back."""
+    ser.reset_input_buffer()
+    ser.write((cmd + "\n").encode())
+    ser.flush()
+    text, hit = read_until(ser, [BM_PROMPT], timeout)
+    if hit is None:
+        sys.exit(f"usbproxy-bm did not answer `{cmd}` within {timeout}s:\n{text[-400:]}")
+    text = text.replace("\r", "")
+    lines = text.split("\n")
+    if lines and lines[0].strip() == cmd:
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "bm>":
+        lines = lines[:-1]
+    return "\n".join(lines).strip("\n")
+
+
+def bm_confirm_prompt(ser, tries=3):
+    """True once a bare newline echoes `bm> ` back."""
+    saved = ser.timeout
+    ser.timeout = 0.05
+    try:
+        for _ in range(tries):
+            ser.reset_input_buffer()
+            ser.write(b"\n")
+            ser.flush()
+            if "bm> " in drain(ser, 0.4):
+                return True
+        return False
+    finally:
+        ser.timeout = saved
+
+
+def bm_status(ser):
+    """`status` as a dict (key=value lines)."""
+    out = bm_run(ser, "status")
+    d = {}
+    for l in out.splitlines():
+        if "=" in l:
+            k, v = l.split("=", 1)
+            d[k.strip()] = v.strip()
+    return d
