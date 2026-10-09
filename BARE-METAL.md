@@ -589,6 +589,31 @@ use p50/p90. Fix pending in trace.cpp.
   M2 exit: a cold cradled boot from the card (Falcon), attach/detach cycles,
   abort-on-unplug.
 
+- **M3 first cut (2026-10-10, 01:00–01:30): adb through the bare-metal
+  bridge.** `src/bridge/bridge.c`: two 4 KiB buffers per direction per
+  slot, messages held until a watch binds. First run: `adb devices` showed
+  the watch as `device` through the firmware 2 s after boot; a 20 MB push
+  went through md5-exact at 2.6 MB/s, but every pull died with adb's
+  `connection terminated: read failed` — the watch's adbd sends no ZLPs,
+  so a payload that is a multiple of 512 B and < 4 KiB merged with the next
+  header in a whole-buffer read and the Mac's 24-byte header read overran.
+  Fixed with adb-aware sized IN reads (header, then `data_length`), plus
+  dropping the Mac's terminator ZLPs toward the watch. Result, twice,
+  md5-exact both ways: **push 4.7 MB/s (≈0.87 ms/cycle), pull 3.5 MB/s
+  (≈1.17 ms/cycle)**. For reference: Linux appliance accelerator off 3.6 /
+  1.5, accelerator on 7.4 / 6.2, direct 7.8 / 7.2. Per-4 KiB costs now:
+  hand-off 1 µs; 138 µs to drain into the watch (the watch's own OUT
+  acceptance, same as Linux saw); 172 µs to drain into the Mac = musb PIO
+  at ~21 µs per packet, now the dominant firmware-side cost. Not at the
+  0.5 ms gate yet, but above Linux-without-accelerator with zero
+  optimisation. Known next steps, in order of expected payoff: cached
+  (instead of uncached) buffers for the musb PIO side with explicit cache
+  maintenance for EHCI; musb double-packet buffering on the adb pair;
+  queueing the payload transfer behind the header on the watch OUT (a
+  small qTD queue in the EHCI fork) instead of a task hop between them; a
+  proper stamp histogram (stamps.c) to split the remaining ~0.4 ms. M3
+  gate measurement (paired runs, shell loop, distributions) still to do.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
