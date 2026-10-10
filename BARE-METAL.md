@@ -1073,11 +1073,19 @@ stays for cards that still carry U-Boot, reachable from FEL with
 how boot0 first got onto the dev card. The console lost `uboot` and `dfu`
 (no SPL paths left); `memw <addr> <val>` added for the probes.
 
-**Open at the time of writing:** the felflash fix untested (board wedged
-until a power cycle); the bad-image and three-deaths policies untested
-(`build/fw-badcrc.uimg`, `build/fw-zero.uimg` prepared); the appliance
-unit still on the 0004 SPL card; soaks; Thumb-2 for the firmware is a free
-29 % if ever wanted.
+**Verified after the power cycle (dev board, UART captured):** the felflash
+fix returns to the BROM (`make flash BOOT0=1`: firmware 172 ms + boot0
+58 ms written and verified, reset, build id matches); the bad-image policy
+(`fw-badcrc.uimg` flashed: `boot0: firmware CRC e8925658, header says
+176da9a7` → FEL why 1); the three-deaths policy (`fw-zero.uimg`, a valid
+uImage of zeros: GP1 b0070000 → 01 → 02 → `3 firmware boots died in a row`
+→ FEL why 2, ~26 s); both recovered with `bm flash build/fw.uimg` from
+FEL. Note GP3's "why" only lasts until the next good boot, so `bm check`
+shows it only when the recovery itself did not go through a normal boot;
+the UART or the FEL device's presence is the live tell. Still open: the
+100-reboot soak and cold boots on the dev board; the appliance unit's
+migration (`bm flash --boot0` from its running firmware); Thumb-2 for the
+firmware is a free 29 % if ever wanted.
 
 ## 9. Codex review (2026-10-09), triaged
 
