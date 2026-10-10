@@ -717,7 +717,7 @@ BM_LOAD = "0x40008000"
 BM_FIRST_PROMPT_S = 20
 
 
-def bm_grade(c, ser, text, expect_rev=None):
+def bm_grade(c, ser, text, expect_rev=None, want_watch=False):
     r = A.boot_report(text)
     c.add(r["bm_banner"], "usbproxy-bm banner", "")
     c.add(r["bm_prompt"], "bm> prompt reached", "")
@@ -739,6 +739,11 @@ def bm_grade(c, ser, text, expect_rev=None):
     else:
         c.add(None, "build id", st.get("build", "?"))
     c.add(None, "entry stamp", f"entry_ms={st.get('entry_ms')} gp2={st.get('gp2')} gp3={st.get('gp3')}")
+    # the watch side: EHCI link and the adb slot bound (M4a: bm check --adb)
+    link = st.get("host_link", "?")
+    bound = "bound:1" in st.get("bridge0", "") or "bound:1" in st.get("bridge1", "")
+    c.add(None if not want_watch else (link == "480" and bound), "watch bound at high speed",
+          f"host_link={link} bridge0={st.get('bridge0', '')[:40]}")
     return st
 
 
@@ -767,7 +772,7 @@ def cmd_bm(args):
         ser = A.open_serial(timeout=1.0)
         if not A.bm_confirm_prompt(ser):
             fail("no `bm> ` prompt on the console")
-        st = bm_grade(c, ser, "usbproxy-bm bm> ", expect_rev=None)
+        st = bm_grade(c, ser, "usbproxy-bm bm> ", expect_rev=None, want_watch=args.adb)
         if args.adb:
             c.add(adb_sees_device(), "adb sees the watch", "")
         for k, v in (st or {}).items():
@@ -809,7 +814,7 @@ def cmd_bm(args):
         c.add(r["dram_mib"] is not None, "SPL DRAM banner", f"{r['dram_mib']} MiB")
     for l in text.replace("\r", "").splitlines()[-12:]:
         say("  | " + l)
-    st = bm_grade(c, ser, text, expect_rev=rev)
+    st = bm_grade(c, ser, text, expect_rev=rev, want_watch=args.adb)
     if args.adb:
         c.add(adb_sees_device(), "adb sees the watch", "")
     ser.close()
