@@ -976,7 +976,8 @@ use p50/p90. Fix pending in trace.cpp.
   the plan ("0xffff0020 unverified") is closed; the firmware-only card is
   now a real option. The appliance unit still carries the pre-0004 SPL:
   `bm cmd uboot` → Linux fallback → `bm flash-usb --uboot …` brings it up
-  to date.
+  to date. Done 20:15: the appliance unit carries the 0004 SPL and firmware
+  37ced93, FEL round trip verified on it too (no UART involved).
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
