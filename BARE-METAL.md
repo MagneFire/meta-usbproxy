@@ -883,6 +883,15 @@ use p50/p90. Fix pending in trace.cpp.
   same Mac-powered Zero, same soak) came back from 16 of 16 reboots in
   25 s; catfish left the port after every reboot today. Whatever the
   supply margin, catfish or its cradle is the larger part of it.
+  **Soak tally at the end of the day** (narwhal for everything after
+  16:25, Mac held awake): reboots 100/100; concurrent push+pull with the
+  shell loop 10/10 on the card build (plus 30/30 and 20/20 in the fix
+  verifications); fastboot cycles 10/10 (bootloader in 0 s, 66 vars, adb
+  back in 25 s each); idle 30 min, no link loss, no port change, `bm check
+  --adb` PASS after it. Still owed: cold boots, unplug mid-push/mid-pull,
+  Mac sleep/resume by hand, FEL recovery, the catfish `fastboot boot` of
+  the AsteroidOS image (catfish needs a cradle that holds first), then the
+  repaired appliance unit. The card carries usbproxy-bm 37476f6.
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
