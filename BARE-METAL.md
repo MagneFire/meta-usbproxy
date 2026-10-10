@@ -788,6 +788,23 @@ use p50/p90. Fix pending in trace.cpp.
   never halted. Mac→watch cut-through is gated on an accepted message so it
   can never leak bytes the framer drops.
 
+- **M4a, the rest of the trimmed list (10:15–10:45).** Progress-gated
+  watchdog: with a watch bound, musb FRNUM (while the Mac keeps the bus
+  awake) and EHCI FRINDEX are sampled every 250 ms; either stuck for 2 s
+  stops the feed, logs, records a fault and the board resets 8 s later.
+  `hangusb` (halts the EHCI) proved it: "usb progress lost (musb ok, ehci
+  stuck)" at +2 s, reset, next boot's `bm check` says "ehci frame counter
+  stuck", the boot after that is clean (the record is one-shot now). `bm
+  check --adb` also requires `host_link=480` and the slot bound. Dropped by
+  agreement: SPL GP-flag→FEL retarget and the 300 ms IN drain before
+  cancelling at unbind. The card holds usbproxy-bm 23e5557 as the Falcon
+  payload; U-Boot proper stays on it for the dev loop.
+  **Where this leaves the project:** M-1 to M4a done. The firmware does
+  everything DEVELOPMENT.md §7 asks of the persistent gadget on the bench,
+  at 86–90% of direct throughput, booting in 0.18 s after the SPL. M4b
+  (soak and fault injection, then the repaired appliance unit) is what is
+  left before it can replace the Linux image.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
