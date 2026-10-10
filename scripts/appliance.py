@@ -816,7 +816,12 @@ def fel_flash_region(felflash, sector, data, what):
     cmd = struct.pack("<7I", FELFLASH_MAGIC, sector, len(data) // 512, crc, FELFLASH_DATA, 0xffffffff, 0)
     fel_write(FELFLASH_CMD, cmd, "cmd")
     fel_exe(FELFLASH_ADDR)
-    st = fel_readl(FELFLASH_CMD + 0x14)
+    rc, out = fel("readl", f"0x{FELFLASH_CMD + 0x14:x}")
+    if rc != 0:
+        fail("felflash did not come back to the BROM (FEL stopped answering). The BROM has no "
+             "watchdog in FEL mode: power-cycle the board, then rerun; boot0 enters FEL on its own "
+             "if the card holds a partial image.")
+    st = int(out.strip().split()[-1], 16)
     ms = fel_readl(FELFLASH_CMD + 0x18)
     if st != 0:
         fail(f"felflash: {what} at sector 0x{sector:x}: {FELFLASH_STATUS.get(st, st)} (status {st}); "

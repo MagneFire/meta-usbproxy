@@ -1,5 +1,11 @@
 # Developer guide — usb-proxy appliance
 
+> **2026-10-10:** the appliance no longer boots U-Boot or Linux. The card carries
+> `boot0` (our own first stage) and the bare-metal firmware `usbproxy-bm`; see
+> BARE-METAL.md (§8c for the boot chain and the FEL-based tooling). The U-Boot and
+> Linux material below is kept as history and still builds.
+
+
 Onboarding notes for the Orange Pi Zero USB-proxy appliance: how to build both
 projects, the change workflows, flashing, serial access, and the quirks that cost
 real time to discover. The user-facing overview is in [`README.md`](README.md);

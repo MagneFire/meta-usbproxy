@@ -1,5 +1,11 @@
 # meta-usbproxy
 
+> **2026-10-10:** the appliance no longer boots U-Boot or Linux. The card carries
+> `boot0` (our own first stage) and the bare-metal firmware `usbproxy-bm`; see
+> BARE-METAL.md (§8c for the boot chain and the FEL-based tooling). The U-Boot and
+> Linux material below is kept as history and still builds.
+
+
 A minimal, **stateless** Yocto (scarthgap) distro + image that turns an
 **Orange Pi Zero** (Allwinner H2+/sun8i-h3) into a single-purpose
 [usb-proxy](https://github.com/MagneFire/usb-proxy) appliance. It does one thing:
