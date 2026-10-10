@@ -160,9 +160,16 @@ def soak_concurrent(n, size_mb):
     md5a = hashlib.md5(a.read_bytes()).hexdigest()
     md5b = hashlib.md5(b.read_bytes()).hexdigest()
     adb("shell", f"mkdir -p {REMOTE_DIR}", timeout=20)
-    rc, out = adb("push", str(b), f"{REMOTE_DIR}/b.bin", timeout=300)
+    # right after a reboot phase the Mac's adb can still be settling
+    # ("65544-byte write failed: No buffer space available" seen once): retry
+    for attempt in range(4):
+        wait_adb(30)
+        rc, out = adb("push", str(b), f"{REMOTE_DIR}/b.bin", timeout=300)
+        if rc == 0:
+            break
+        log(f"concurrent: seed push attempt {attempt + 1} failed: {out.strip()[-120:]}")
+        time.sleep(5)
     if rc != 0:
-        log(f"concurrent: seed push failed: {out.strip()[-120:]}")
         return False
     ok = 0
     with ShellLoop() as loop:
