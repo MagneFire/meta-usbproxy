@@ -805,6 +805,62 @@ use p50/p90. Fix pending in trace.cpp.
   (soak and fault injection, then the repaired appliance unit) is what is
   left before it can replace the Linux image.
 
+- **M4b soak, first day (10:30–16:15), three findings.** `scripts/bm-soak.py`
+  drives it (reboots / concurrent push+pull with a shell loop / fastboot
+  cycles / idle watch; `all` chains them). 100 warm reboots passed (adb
+  back in 0–3.6 s, `bm check --adb` clean each time). Then:
+  1. **Concurrent push+pull corrupted the pull** (never the push, never
+     sequential): about one 8 MB iteration in four came back with 64 wrong
+     bytes, or adb dropped the transport with "failed to read copy
+     response: EOF" when the damage hit a header. The 64 bytes were always
+     a watch OKAY header (the push's ack) followed by 40 bytes of a payload
+     two WRTEs older: the content of a 512-byte slot the TX FIFO had held
+     before, with the first 16 words of the new packet missing. Ruled out
+     one by one: the Mac (same data via the adb trace), the EHCI buffer (a
+     canary in the last word of every 64-byte line never tripped in 10k+
+     packets, so the overlay count does *not* run ahead of the data as M3
+     believed), the cache (explicit invalidate changed nothing), the DPB
+     early fill (same rate with it off: 6/15 vs 6/15). What changed the
+     outcome: TX via the inner DMA, 12/12 clean; `cut 0`, clean (one
+     4096-byte transfer per message, loads mostly from the TX ISR);
+     **ep1 TX FIFO single-buffered, 20/20 clean** with throughput unchanged.
+     So: PIO loads into the sunxi musb's double-buffered TX FIFO lose their
+     first 16 words about once per 2000 packets while the RX side is busy.
+     Linux keeps the sunxi FIFOs single-buffered; DPB had bought nothing in
+     M3 anyway. Fixed in the fifo_map (usbproxy-bm c6f2f59), RX stays
+     double-buffered. The M3 "64–128 stale bytes at packet starts" that
+     motivated the one-packet cut-through lag was very likely this same
+     bug; the lag stays as margin (~10 µs per message), `cutlag`/`cutcanary`
+     knobs allow revisiting.
+  2. **Mac sleep looped the board.** This Mac sleeps after 1 min idle; when
+     it did, the gadget logged `suspended`, then `resumed` 2 ms later with
+     no SOFs following, so `tud_suspended()` was false, the progress gate
+     saw musb FRNUM frozen, the watchdog reset the board, the re-enumeration
+     woke the Mac over USB (`wake reason: USB2_plug`), and the two cycled
+     every 57 s (13 reboots, `boots=` in `status` counts them). Fix: the
+     gate no longer treats a silent gadget bus as a fault, only the EHCI
+     (our own host controller) can fail it; the bus idle/active transitions
+     are logged. A device cannot tell a sleeping host from a dead link, and
+     resetting the board is the one thing that makes it worse. Mac
+     sleep/resume with the fix is a hands-on test still owed (the Mac must
+     be woken by hand; nothing on the rig may do it).
+  3. **The watch's cradle drops are power, not data and not firmware.** The
+     watch left the EHCI port five times today (PORTSC 0x1000, nothing for
+     minutes until a reseat). Its own `dmesg` shows the order each time:
+     charger status interrupt, "USB input removed", *then* the controller's
+     disconnect event, and `charger_online = 0` for the whole gap. The
+     Zero's type-A VBUS is hard-wired on (DTS comment) and the board never
+     rebooted, so 5 V vanished between the Zero's socket and the pogo pins.
+     Drops happened while the watch was still drawing its 500 mA charge
+     current; once it reached termination the link held. Worth a look at
+     the cradle plug and pins before the appliance unit.
+  Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
+  Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
+  … 65s") had nothing to do with the gadget, which sits on usb-drd0.
+  Lesson for the soak tooling: a run that fails 100% after having failed
+  20% is the rig, not the fix — check `boots=` and the Mac's power state
+  before believing it.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it

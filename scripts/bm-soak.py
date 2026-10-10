@@ -198,8 +198,9 @@ def soak_concurrent(n, size_mb):
             good = res["push"][0] == 0 and res["pull"][0] == 0 and rmd5 == md5a and pmd5 == md5b
             ok += good
             st = status_fields("fault", "host_link")
+            md5s = f"pushed:{'ok' if rmd5 == md5a else 'BAD'} pulled:{'ok' if pmd5 == md5b else ('missing' if pmd5 == '?' else 'BAD')}"
             log(f"concurrent {i}/{n}: {dt:.1f}s push_rc={res['push'][0]} pull_rc={res['pull'][0]} "
-                f"md5 {'OK' if good else 'MISMATCH'} shell_loop={loop.count}/{loop.fail}fail fault={st.get('fault')} link={st.get('host_link')}")
+                f"md5 {md5s} shell_loop={loop.count}/{loop.fail}fail fault={st.get('fault')} link={st.get('host_link')}")
             if not good:
                 log("   push: " + res["push"][1].strip()[-150:].replace("\n", " | "))
                 log("   pull: " + res["pull"][1].strip()[-150:].replace("\n", " | "))
