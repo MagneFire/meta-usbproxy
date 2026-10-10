@@ -905,6 +905,17 @@ use p50/p90. Fix pending in trace.cpp.
      addr2line. Owed: the 20 cold boots of the hands-on list, with the UART
      captured. The card carries usbproxy-bm 28b8b14 (also: PA17 is the red
      status LED, PL10 the green power LED; names fixed).
+  **Boot timing, measured (usbproxy-bm edfe146, narwhal cradled, 18:45):**
+  warm reboot, gadget gone → re-enumerated by the Mac 0.31 s (3/3 runs;
+  firmware `configured by the host` at 0.425 s after entry, the watch
+  bound 0.05–0.45 s later), gone → `adb devices` says `device` 0.47–1.07 s
+  (the spread is adb's 1 Hz IOKit rescan). Cold power-on from the 18:01
+  capture: Mac port power → gadget enumerated 0.58 s (BROM+SPL ≈ 0.16 s
+  of it). Linux on the same path (§0): warm reboot → gadget back
+  1.13–1.16 s, cradle attach → adb 1.85 s (1.0 s settle debounce + the
+  rescan); cold power-on was never measured there. So the plug-in →
+  enumeration path is ~0.85 s shorter and the watch binds without the
+  settle debounce; adb's own rescan now dominates what the Mac user sees.
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
