@@ -733,6 +733,19 @@ use p50/p90. Fix pending in trace.cpp.
   that only the accelerator (local OKAY) beats direct, which is exactly what
   the bare-metal spike set out not to need.
 
+- **The 2 KiB-floor experiment (2026-10-10, 09:10).** Mac→watch cut-through
+  forwarding in 2 KiB halves (progress from the PIO count or the RX DMA
+  residual, one packet back) cut the delivery leg from 120 to 40 µs — and the
+  watch's OKAY arrived at exactly the same absolute time (header→OKAY
+  583–601 vs 588–609 µs; push 6.7–7.0 MB/s either way, A/B twice on one
+  boot). The watch's turnaround is not bounded by when its last byte lands.
+  Off by default. **M3 closes here**: warm watch, push 0.585–0.61 ms
+  (6.7–7.0 MB/s, 86–90% of direct), pull 0.66 ms (6.2 MB/s, 86%), both
+  md5-exact over every run today; the ~60–100 µs left per cycle is the two
+  control-path legs a proxy cannot remove (header in, OKAY out: one packet
+  time plus one hop each). First-run-after-idle cold watch: 2–5× slower,
+  independent of the proxy.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
