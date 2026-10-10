@@ -765,6 +765,20 @@ def cmd_bm(args):
         ser = A.open_serial(timeout=1.0)
         if not A.bm_confirm_prompt(ser):
             fail("no `bm> ` prompt on the console")
+        if args.rest and args.rest[0] in ("-f", "--follow"):
+            # like dmesg --follow: the firmware streams new log bytes until a key
+            ser.write(b"log -f\n")
+            try:
+                while True:
+                    d = ser.read(4096)
+                    if d:
+                        sys.stdout.write(d.decode("utf-8", "replace").replace("\r", ""))
+                        sys.stdout.flush()
+            except KeyboardInterrupt:
+                ser.write(b" ")
+                time.sleep(0.2)
+                ser.read(4096)
+            return
         print(A.bm_run(ser, f"log {args.rest[0] if args.rest else 4096}", timeout=10))
         return
     if op == "check":
@@ -862,7 +876,7 @@ def main():
     p.add_argument("--power-cmd", help="command that cycles the supply, for --cold")
     p.set_defaults(fn=cmd_soak)
 
-    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | check | cmd <text> | log [bytes]")
+    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | check | cmd <text> | log [bytes|-f]")
     p.add_argument("op", choices=["run", "flash", "check", "cmd", "log"])
     p.add_argument("rest", nargs="*")
     p.add_argument("--baud", type=int, default=750000, help="Y-modem rate (default 750000; 0 = stay at 115200)")
