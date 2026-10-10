@@ -614,6 +614,82 @@ use p50/p90. Fix pending in trace.cpp.
   proper stamp histogram (stamps.c) to split the remaining ~0.4 ms. M3
   gate measurement (paired runs, shell loop, distributions) still to do.
 
+- **M3 datapath optimisation (2026-10-10, 06:50–08:00, usbproxy-bm
+  3ac2b4a → 249f33f).** Same rig, 10 MB ×2 per point, md5-exact throughout.
+  Result: **push 5.35 MB/s (0.77 ms/cycle), pull 6.05 MB/s (0.68 ms)** from
+  4.7/3.5; direct is 7.8/7.2 (0.52/0.57 ms), so the firmware now adds
+  ≈0.25 ms on push and ≈0.1 ms on pull. What moved it, in order found:
+  1. *Cached bridge buffers* (pull 3.5 → 4.5). The musb PIO loop read the
+     uncached `.dma` section one 32-bit word at a time, a DRAM round trip
+     per word. Buffers are now cached, whole cache lines, with DCCMVAC /
+     DCIMVAC by address around the EHCI DMA (`hcd_dcache_*` strong
+     definitions; no-ops inside `.dma`). Measured PIO cost after: 10.0 µs
+     per 512 B FIFO read, 2.8 µs per write (FIFO register reads are the
+     slow side).
+  2. *musb double packet buffering on the adb pair* — no measurable gain
+     by itself, three bugs to get it working: the RX service loop must stop
+     when no transfer is armed (RXPKTRDY is deliberately left set as
+     back-pressure; the first cut spun in the ISR until the watchdog); the
+     second buffer's RXPKTRDY re-asserts late and its interrupt can be
+     folded into the first's, so FIFOFULL is sampled before the release;
+     and the TX path must never load the FIFO while TXPKTRDY is set (Linux's
+     `txstate()` guard) — once per 4 KiB transfer the IRQ for packet k−1
+     arrived with both buffers full and the write corrupted the stream (Mac
+     `usb_read` failed with kIOReturnOverrun on every pull). Also replaced
+     upstream's best-fit FIFO allocator with a static size-aligned map: an
+     unaligned 1 KiB double buffer, and a layout with FIFOs at ≥5120,
+     both produced garbage on the CDC console endpoints; offsets up to 4608
+     verified. The H3 FIFO RAM is not simply 8 KiB flat.
+  3. *Conditional `wfi`* (OKAY-to-Mac leg 99 → 12 µs). The main loop slept
+     unconditionally after each pass, so any completion raised during the
+     task pass waited for the next interrupt — up to one SOF period,
+     125 µs. Now: IRQs masked, sleep only if both TinyUSB queues are empty
+     and no EHCI transfer is in flight.
+  4. *EHCI completion polling* (pull 4.65 → 5.75, OKAY-to-watch leg 125 →
+     21 µs). Interrupt Threshold Control cannot go below one microframe, so
+     every EHCI completion IRQ was quantised to a 125 µs boundary — a 24-byte
+     OUT to the watch cost ~120 µs, and splitting payloads into smaller
+     transfers made things *worse* (each transfer paid it). The main loop
+     now walks the async QHs for retired qTDs (EHCI IRQ masked). This
+     exposed a latent bug in TinyUSB's `qhd_xfer_complete_isr`: it checks
+     only the QH overlay's Active bit, which still shows the previous
+     transfer's 0 between `qhd_attach_qtd()` and the HC's advance-queue;
+     the poll completed transfers that never ran (enumeration hung on the
+     status stage). The check now also requires the qTD itself retired.
+  5. *2 KiB chunks* (push 5.0 → 5.35, pull 5.75 → 6.05). With completions
+     cheap, forwarding each 4 KiB payload as two transfers overlaps the
+     second half's arrival with the first half's delivery. 1024/512 are
+     worse again: every transfer boundary costs a NAK round on the musb
+     side (RXPKTRDY back-pressure until the next read is armed) and a qTD
+     on the EHCI side. Runtime knob `chunk N` on the console.
+  Cycle stamps (`status` → `cycle_push` / `cycle_pull`, means over all
+  cycles, µs, chunk 2048): push header→payload in 212, →delivered to watch
+  109, →OKAY from watch 378, →OKAY delivered to Mac 16, Mac turnaround ≈65;
+  pull header→payload in 201 (the watch's own sending pace), →delivered to
+  Mac 52, →OKAY from Mac 119, →OKAY delivered 21, watch turnaround ≈285.
+  adb keeps exactly one WRTE outstanding (in-flight depth 0 at every
+  header). The watch's own turnaround (≈380 µs on push, ≈285 on pull) is
+  the largest single term and is in the direct numbers too.
+  Where the remaining ≈0.25/0.1 ms is and what would take it: (a) the Mac's
+  4 KiB arrives into musb at ~25 µs/packet (200 µs) versus ~100 µs into the
+  watch's UDC directly — musb DMA mode 1 (one interrupt per transfer, wire
+  speed, no PIO) is the fix, Allwinner's USB DMA block, not yet written;
+  (b) true cut-through — forward packets as they land inside one large read
+  instead of chunk boundaries: a qTD queue on the EHCI OUT side, overlay
+  progress on the EHCI IN side — would take the delivery legs (109/52) to
+  ~20. Together those put push around 0.58 ms and pull around 0.6 ms, i.e.
+  within ~10% of direct. **Gate reading:** the plan's 0.5 ms / ≥8 MB/s
+  target was written against the 0.45 ms direct estimate; the measured
+  direct is 0.52/0.57 ms (7.8/7.2 MB/s), so ≥8 MB/s is not reachable by
+  any proxy. Against the real ceiling the firmware is at 69% (push) / 84%
+  (pull) of direct with two identified, mechanical steps left.
+  Tooling lessons: the build id is a generated `build/gitrev.h` (a `-D`
+  left stale strings in a newer binary; a phony-driven header rule never
+  retriggered under Apple's make 3.81); the loopback flood stage is opt-in
+  (with the bridge present it fills the 4 buffers and stalls); the watch
+  physically dropped off the cradle twice this session — Linux on the card
+  sees only root hubs in that state, which is how to tell it from firmware.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
