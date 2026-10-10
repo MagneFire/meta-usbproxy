@@ -404,8 +404,8 @@ both stacks have them. Pin the stack commit.
    proves the cable before any firmware exists. FEL is still the dev
    loop: the SPL can jump to the BROM's FEL entry on an RTC flag (the
    same trick as `DFU1`; a SUSE U-Boot patch does exactly this for the H3
-   with entry `0xffff0020` — verify against the BROM before relying on
-   it), after which `sunxi-fel write/exe/read` from the Mac over the OTG
+   with entry `0xffff0020` — verified on both the dev board's silicon on
+   2026-10-10, U-Boot patch 0004 + the firmware's `fel`, see §8b), after which `sunxi-fel write/exe/read` from the Mac over the OTG
    port loads code and dumps memory with no card writes. When the
    firmware later moves to the appliance unit (no UART), the CDC console
    and the log ring are all there is — keep both first-class from M1.
