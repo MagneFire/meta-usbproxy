@@ -1,0 +1,126 @@
+---
+name: appliance
+description: Deploy to and verify the Orange Pi usb-proxy appliance — RAM-only binary swap, RAM-only whole-image boot, or flashing the card over the serial console or over USB (U-Boot DFU) — and the checks that prove it took. Use whenever a change must reach the board, when "did the flash work?", or when the board looks wrong after a deploy.
+---
+
+# Deploying to the appliance
+
+Everything goes through `scripts/appliance.py` (run with `uv run`, from the
+repo root). Each subcommand ends with the same `check`; a deploy without a
+passing check is not done.
+
+## Pick the tier
+
+| What changed | Command | Survives reboot? | Time |
+|---|---|---|---|
+| usb-proxy source (`/Users/darrel/Downloads/usb-proxy`) | `appliance.py swap` | no (RAM rootfs) | ~2 min |
+| kernel, DT, initramfs contents, launcher, config.json, inittab | `appliance.py boot-ram` | no (card untouched) | ~3 min (750000 baud), ~12 min if U-Boot lacks the baud option |
+| the release: anything, for keeps | `appliance.py flash --adb` | yes | as above + reset |
+| the release, no UART dongle | `appliance.py flash --usb --adb` | yes | ~20 s (U-Boot DFU over the OTG port; needs `dfu-util` and a card that already has the DFU U-Boot/boot.scr — flash those once over UART with `flash --uboot`) |
+| U-Boot / SPL (DRAM clock, WDT, this fragment) | `appliance.py flash --uboot` | yes | + ~1 min |
+
+`swap` builds the devtool workspace (`devtool modify --no-extract usb-proxy
+/Users/darrel/Downloads/usb-proxy` must be active; without it the pinned
+build from the deploy dir is sent). `boot-ram` and `flash` take the deploy
+dir's `uImage-initramfs-orange-pi-zero.bin` after a `bitbake usbproxy-image`
+in OrbStack (DEVELOPMENT.md §2). `boot-ram`/`flash` transfer at 750000 baud
+by default (the card's U-Boot has had `CONFIG_SYS_LOADS_BAUD_CHANGE` since
+2026-09-09) and fall back to 115200 when a U-Boot does not offer the switch;
+`--baud 0` forces 115200. Never another fast rate: the UART divisor rounds it
+and the board strands waiting for ENTER.
+
+## What `check` must print
+
+All PASS: SPL DRAM banner **256 MiB** (512 = misdetection, nothing after it
+counts), watchdog armed, no oops, login reached, image build stamp equals the
+deploy dir's, usb-proxy md5 equals the build's, exactly one real
+`/usr/bin/usb-proxy` running, pstore empty, and with `--adb` the watch listed
+as `device` on the Mac. `appliance.py check --adb` runs it on a live board;
+`--reboot` grades a fresh boot first. Console transcripts land in
+`~/.cache/appliance/`.
+
+## Before a release flash
+
+- `devtool reset usb-proxy`, then `bitbake usbproxy-image`; the SRCREV in
+  `recipes-apps/usb-proxy/usb-proxy_git.bb` must be the pushed `opi` commit.
+- If a change "did not take": sstate. `bitbake -c cleansstate <recipe>` and
+  rebuild (DEVELOPMENT.md §8). `check` catches this: the build stamp will not
+  match.
+- Not while an adb/fastboot session or TWRP is in use on the watch: every
+  tier reboots or respawns the proxy.
+
+## Gotchas (each cost hours once)
+
+- **Only one USB-UART dongle**, or set `PI_DEV`; the node name changes.
+  Without a dongle the scripts fall back to the USB console
+  (`/dev/cu.usbmodem*`, the CDC-ACM function on the proxy port): shell-level
+  things work there (`check`, `swap`, `flash --usb`), U-Boot-level things
+  (`boot-ram`, serial `flash`, `--reboot` grading) do not. With the
+  persistent gadget (`persistent_gadget: true`, the appliance default since
+  2026-09-12) the node is always `/dev/cu.usbmodemUSBPROXY011` and survives
+  adb↔fastboot transitions; `adb devices`/`fastboot devices` then show the
+  fixed serial `USBPROXY01`, not the watch's. Only a proxy respawn
+  (`swap`, `kill -9`) re-enumerates it.
+- **Kernel file = `uImage-initramfs-*.bin`.** The plain `uImage-*.bin` hangs at
+  "Starting kernel" and needs a power-cycle; the scripts refuse it.
+- **Restart the proxy with `kill -9`**, never SIGTERM (graceful path hangs on
+  the connected host). `swap` does this.
+- **A respawn can wedge the Mac's USB port** (stale device object): `adb`
+  sees nothing though the board is fine. `check --adb` runs
+  `scripts/mac-usb-unwedge.py` once; run it by hand before any replug.
+- **Replugging the Mac↔Pi cable power-cycles the Pi** and erases the RAM log
+  and any swapped binary.
+- **`USBPROXY01 offline` after a watch reboot, with `does not fit the
+  adb/fastboot template` and `18d1:0afe` in the log**: the watch came up in
+  usb-moded's charging-only mode, not a proxy fault (DEVELOPMENT.md §7).
+  Reseat the watch; that power-cycles the board too (swap and log gone). A
+  USB-A port power-cycle does not clear it.
+- **No UART any more (2026-10-03):** the board's RX/TX pins are not
+  reachable, so `--catch`, serial `flash` and `boot-ram` are dead paths
+  and the SPL no longer looks for a serial key. The ways in are
+  `flash --usb` (the DFU1 flag set from Linux over the USB console), the
+  RTC GP1 guard (a Falcon boot that dies hands the next boot to U-Boot
+  proper and the FAT kernel), and pulling the card. A kernel that is
+  broken in both copies therefore means a card pull: `boot-ram` the
+  equivalent first is no longer possible, so treat every kernel config
+  change as a card-pull risk and keep the previous deploy dir around.
+  `check` says which path a boot took (`psci=no` = Falcon) and why the
+  SPL fell back (DFU1 flag, last Falcon boot died).
+- **The SPL D-cache lesson**: an SPL change that can hang must come after
+  the watchdog arm; U-Boot's `DCACHE_OFF` mapping is execute-never and the
+  SPL runs from SRAM at 0x0 (DEVELOPMENT.md §8).
+- **BusyBox shell**: `head -n 3` not `head -3`; no `base64`; lines over
+  1024 chars are silently truncated.
+- **Power measurements**: not with a single meter reading (DEVELOPMENT.md §10).
+
+Why each of these is so: DEVELOPMENT.md §5–§9.
+
+## Bare-metal firmware (usbproxy-bm, since 2026-10-10 over FEL only)
+
+The dev card and (once migrated) the appliance unit carry no U-Boot or
+Linux: `boot0` at sector 16 (our own first stage, BARE-METAL.md §8c) and the
+firmware uImage at sector 0x18800. Everything goes over the OTG cable through
+the BROM's FEL mode; the UART is optional (and its dongle must not be held by
+a terminal while `appliance.py` runs, or set `PI_DEV=/dev/cu.usbmodemUSBPROXYBM1`).
+
+| Need | Command (in `~/Downloads/usbproxy-bm`) | Card written? |
+|---|---|---|
+| try a firmware | `make fel` or `appliance.py bm run build/fw.bin` | no |
+| release the firmware | `make flash` (= `appliance.py bm flash build/fw.uimg`) | yes, sector 0x18800 |
+| release boot0 too | `make flash BOOT0=1` (`bm flash --boot0`, boot0 written last) | yes, + sector 16 |
+| is it running what I built? | `appliance.py bm check --adb` (build id, GP3 = boot0 jump ms or the FEL reason) | — |
+| debug boot0/SD/DRAM | `sunxi-fel -v spl build/boot0.bin` with the UART captured: clocks, DRAM, card probe, back to FEL | no |
+
+Sequence under `bm run/flash`: the firmware's `fel` console command (GP1
+request + watchdog reset, boot0 jumps into the BROM) → `sunxi-fel spl
+boot0.bin` (DRAM up, returns) → write + exe, or felflash per region with a
+readback CRC → a watchdog-reset blob leaves FEL → the USB console comes
+back and is graded. A board already in FEL is fine. If a felflash run does
+not return (status read times out) the BROM is wedged with no watchdog:
+power cycle. Cards that still carry U-Boot: `bm flash-usb` (DFU); from FEL,
+`sunxi-fel uboot ~/Downloads/u-boot-sunxi-with-spl-fel.bin write 0x43100000
+~/Downloads/usbproxy-dfu.scr` boots that U-Boot into DFU from RAM.
+
+boot0's fallbacks all end in FEL: a firmware that dies three boots in a row
+(GP1 death counter), a bad or missing uImage, a DRAM or SD failure; `bm check`
+reports which one from GP3 once the board is back.

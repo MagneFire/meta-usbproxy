@@ -310,6 +310,8 @@ both stacks have them. Pin the stack commit.
   a bad image or GP1 = "last boot died" becomes a jump to FEL). First
   thing after entry: feed the watchdog, stamp GP2, clear GP1 once the
   gadget is attached (the "boot reached userspace" meaning today).
+  *2026-10-10 evening: the SPL itself is gone too — `boot0` (usbproxy-bm
+  `src/boot0/`) is the first stage, see §8c.*
 - **Dev loop and recovery = FEL + UART.** `sunxi-fel spl sunxi-spl.bin`
   (the SPL inits DRAM and returns to FEL — stock U-Boot behaviour),
   `sunxi-fel write 0x40008000 fw.bin` + `exe`: a new firmware runs from
@@ -371,7 +373,9 @@ both stacks have them. Pin the stack commit.
 
 ## 6. Variants considered and parked
 
-- **SRAM-only firmware (no U-Boot at all).** Own eGON boot0, no DRAM
+- **SRAM-only firmware (no U-Boot at all).** *Ruled out 2026-10-10: the
+  EHCI cannot address SRAM A1, C or A2 at all (§8c). The "own boot0" half
+  of this idea is what shipped, with DRAM.* Own eGON boot0, no DRAM
   init, firmware in the 108 KiB of contiguous SRAM. Removes most of the
   SPL's ~0.11 s of retained work and the DRAM flakiness class entirely,
   and the SPL's DRAM code is the only thing the SPL still contributes.
@@ -984,6 +988,96 @@ use p50/p90. Fix pending in trace.cpp.
   Lesson for the soak tooling: a run that fails 100% after having failed
   20% is the rig, not the fix — check `boots=` and the Mac's power state
   before believing it.
+
+## 8c. boot0: the U-Boot SPL replaced, SRAM-only ruled out (2026-10-10 evening)
+
+**Goal.** Nothing from U-Boot or Linux on the card or in the boot chain
+(plan `check-spl-fel-retarget-experiment-and-pe-federated-rivest`). Darrel's
+choices: probe SRAM first and go SRAM-only if it holds; card writes by our
+own FEL flasher; a firmware that dies three boots in a row parks in FEL.
+
+**Phase 0 probes (dev board, probe builds run from RAM over FEL, nothing
+written).**
+
+| Probe | Result |
+|---|---|
+| Thumb-2 trial link (`-mthumb` for C, asm stays ARM) | fw.bin 59,392 → 42,052 bytes (−29 %), links clean. Not adopted yet: pointless once SRAM is out |
+| SRAM C (0x10000, 44 KiB) over FEL | reads 0 and drops writes until the **VE bus gate** (CCU BUS_GATE1 bit 0) is on; SYSCON 0x4 bit 24 (reset default 1) must stay set. Then 0x10000–0x1AFFF RW, nothing at 0x1B000+. The reset deasserted or not makes no difference |
+| SRAM A2 | 0x44000–0x4BFFF RW over FEL; 0x40000–0x43FFF and 0x4C000+ not memory (0x40000 reads one word) |
+| FEL-free areas | writes to 0x8000–0xFFFF and all of A2 leave the BROM's FEL alive (sunxi-tools' three protected areas are all below 0x8000) |
+| EHCI pool in A2 | watch port connects, enumeration never completes (no QH fetch) |
+| EHCI pool in A1 at 0x8000 (image at 0x40008000) | undef fault 50 ms in at image offset 0x510 = a pool offset the EHCI writes; not explained, the alias theory (EHCI address bit 30 ignored) was tested and is false |
+| TinyUSB host request + enumeration buffer alone in A1 0xC000 / C 0x10000 / A2 0x44000 (image at 0x41000000, pool in DRAM) | control transfer completes, descriptor never lands in SRAM; the DRAM alias of each address stays untouched. **Control: the same build with the buffer at DRAM 0x4000C000 enumerates** |
+
+Verdict: the EHCI (and so the whole datapath) cannot reach SRAM; an
+SRAM-only firmware would still need DRAM for every buffer. The fallback
+branch of the plan applies: our own first stage with the DRAM init ported,
+firmware unchanged in DRAM.
+
+**boot0 (usbproxy-bm 8a3bee8+, `src/boot0/`, `src/h3/{clock,dram,mmc}.c`,
+`src/lib/crc32.c`, `ld/boot0.ld`, `tools/egon.py`).** 16 KiB eGON.BT0 image
+at SD sector 16 (8.9 KB of code), `.bss` and stack in SRAM A2. Entry:
+fel_stash (sp/lr/cpsr/sctlr/vbar), the GP1 == 0xb0010fe1 FEL request first
+of all (patch 0004's mechanism, jump to 0xffff0020 with SCTLR.A clear),
+D-cache clean+invalidate, MMU/D-cache off, I-cache on. Card mode: death
+counter in GP1 (`0xB00700NN`, NN consecutive boots the firmware did not
+clear; 3 → FEL), 8 s watchdog, GP2 = entry ms, clocks as the SPL left them
+(PLL1 1008 MHz, PLL6 600 → AHB1 200, APB2 24; `clock_sun6i.c` reduced),
+DRAM (U-Boot `dram_sunxi_dw.c` + `ddr3_1333.c` + patch 0001's 16-word size
+detection, H3/DDR3/32-bit only, CLK 312 ZQ 3881979 ODT on), SD (own PIO
+driver: 400 kHz 1-bit dialogue CMD0/8/55+41/2/3/7/55+6/16, then **25 MHz
+from PLL6 /2/12 with U-Boot's delays, 4-bit** — 24 MHz straight from the
+oscillator with M=1 answered every command with a response error, 12 MHz
+and 400 kHz worked), uImage at sector 0x18800: magic, size, load == ep,
+the data read straight to its load address (the header is the first 64
+bytes of the first sector, not a sector of its own: the first attempt read
+from sector+1 and checked the CRC of the image shifted by 448 bytes),
+CRC32 against ih_dcrc, GP3 = jump ms, CNTFRQ, jump with r0–r2 = 0. FEL
+mode (sunxi-fel patched the magic): clocks + DRAM, DRAM size into the
+header for sunxi-fel, a **card probe** (sector 16 eGON, the firmware uImage
+read and CRC-checked, timings printed on the UART), return to the BROM.
+Any failure in card mode → FEL via GP1 = FEL1 + watchdog reset (GP3 =
+0xB007000N keeps why: 1 bad image, 2 three deaths, 3 DRAM, 4 SD): a jump to
+0xffff0020 from *after* clocks and SD traffic made the BROM retry the card
+boot instead (it only fell through to FEL once our wedged SD controller
+made its own read fail), while the jump from boot0's first instructions is
+the verified one.
+
+Measured on the dev card (UART): BROM → boot0 entry 114 ms, DRAM init
+15 ms (the SPL's was estimated at ~110), SD init + 60 KiB read 28 ms, jump
+at 170 ms, firmware entry 189 ms (SPL/Falcon path: 180 ms). `bm check
+--adb` PASS, watch bound, `fel` → `sunxi-fel ver` → `fel-reset` → card boot
+all work. The FEL probe loop (`sunxi-fel -v spl build/boot0.bin` + UART)
+turns a driver iteration into 5 s.
+
+**felflash (`src/felflash/`, `ld/felflash.ld`, 4.8 KB in DRAM at
+0x4ff00000).** After boot0's FEL run: the Mac writes the data to 0x41000000
+and a command block `{FLSH, sector, count, crc, data, status, ms}` to
+0x4ff10000, `sunxi-fel exe`, reads the status back; felflash checks the
+data CRC (transfer), writes, reads back after the data, checks the CRC
+again, returns to the BROM. First run: 117 sectors written and verified in
+141 ms — then the FEL session died: the saved stack pointer sat in `.bss`,
+zeroed by the entry code after it was saved, so the return to the BROM
+used sp = 0. Fixed (callee-saved register). The BROM has no watchdog in
+FEL mode: that hang needed a power cycle, so the Mac side ends every
+session with a reset and a felflash that does not return means a replug.
+
+**Tooling.** `appliance.py bm run <fw.bin>` and `bm flash <fw.uimg>
+[--boot0]` go over FEL (the firmware's `fel`, `sunxi-fel spl boot0.bin`,
+then write/exe or felflash; `--boot0` rewrites sector 16 last so an
+interrupted run leaves a head the BROM rejects); `make flash [BOOT0=1]`,
+`make fel`, `make boot0`, `make felflash`. `bm flash-usb` (U-Boot DFU)
+stays for cards that still carry U-Boot, reachable from FEL with
+`sunxi-fel uboot ~/Downloads/u-boot-sunxi-with-spl-fel.bin write 0x43100000
+~/Downloads/usbproxy-dfu.scr` (bootcmd_fel + a `dfu 0 mmc 0` script): that is
+how boot0 first got onto the dev card. The console lost `uboot` and `dfu`
+(no SPL paths left); `memw <addr> <val>` added for the probes.
+
+**Open at the time of writing:** the felflash fix untested (board wedged
+until a power cycle); the bad-image and three-deaths policies untested
+(`build/fw-badcrc.uimg`, `build/fw-zero.uimg` prepared); the appliance
+unit still on the 0004 SPL card; soaks; Thumb-2 for the firmware is a free
+29 % if ever wanted.
 
 ## 9. Codex review (2026-10-09), triaged
 

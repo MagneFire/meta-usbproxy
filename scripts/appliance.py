@@ -845,6 +845,18 @@ def bm_grade(c, ser, text, expect_rev=None, want_watch=False):
         c.add(st.get("build", "").startswith(expect_rev), "build id", f"{st.get('build')} (local {expect_rev})")
     else:
         c.add(None, "build id", st.get("build", "?"))
+    # GP3: boot0's jump stamp (ms since power-on) on a normal boot, or
+    # 0xB007000N when boot0 last fell back to FEL (1 bad image, 2 three
+    # deaths, 3 DRAM, 4 SD). GP2 is the firmware's own entry stamp.
+    try:
+        gp3 = int(st.get("gp3", "0"), 16)
+    except ValueError:
+        gp3 = 0
+    why = {1: "bad image", 2: "three dead boots", 3: "DRAM init", 4: "SD"}
+    if (gp3 & 0xffff0000) == 0xb0070000:
+        c.add(None, "boot0", f"last fell back to FEL: {why.get(gp3 & 0xff, gp3 & 0xff)}")
+    elif gp3 and gp3 < 0x1000000:
+        c.add(None, "boot0", f"jumped to the firmware at {gp3} ms")
     c.add(None, "entry stamp", f"entry_ms={st.get('entry_ms')} gp2={st.get('gp2')} gp3={st.get('gp3')}")
     # the watch side: EHCI link and the adb slot bound (M4a: bm check --adb)
     link = st.get("host_link", "?")
