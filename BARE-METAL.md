@@ -1082,10 +1082,35 @@ uImage of zeros: GP1 b0070000 → 01 → 02 → `3 firmware boots died in a row`
 → FEL why 2, ~26 s); both recovered with `bm flash build/fw.uimg` from
 FEL. Note GP3's "why" only lasts until the next good boot, so `bm check`
 shows it only when the recovery itself did not go through a normal boot;
-the UART or the FEL device's presence is the live tell. Still open: the
-100-reboot soak and cold boots on the dev board; the appliance unit's
-migration (`bm flash --boot0` from its running firmware); Thumb-2 for the
-firmware is a free 29 % if ever wanted.
+the UART or the FEL device's presence is the live tell. **Soak:** 100/100 warm reboots through boot0 (`bm-soak.py reboots 100`,
+~8 s per cycle, every check PASS). **Concurrent push+pull, however,
+stalled** under boot0: rounds 1–2 took 5.5 s (the SPL-booted firmware does
+them in 3.4 s), round 3 hung at 300 s with the framer waiting on 4 KiB of a
+WRTE that never arrived, adb dead on the Mac (`offline` after an adb
+restart, `adb shell` timing out), no fault, port never changed. A
+re-present of the gadget let the Mac's new CNXN reach the watch (OUT
+completed) but the watch's IN reply never came; `hostcycle 1` (port reset,
+re-enumeration) brought adb back, and the next seed push stalled the same
+way. A/B with the U-Boot SPL written back to sector 16 and the identical
+firmware: 5/5 rounds, 3.4 s each. Register dumps (CCU, DRAM controller,
+SRAM controller) boot0 vs SPL differ only in the SD module clock, the CCU
+security switch (0x2f0 = 7 under the SPL, non-secure access bits, moot for
+a secure firmware) and DRAM PHY training values by a few units. CPU state
+then: the BROM leaves Cortex-A7 ACTLR.SMP clear, which the TRM requires
+set before caches/MMU go on (Linux's proc-v7 sets it; the H3 U-Boot SPL
+does *not* select SPL_ARMV7_SET_CORTEX_SMPEN, so it is not the SPL/boot0
+difference either) — the firmware now sets it with the caches off
+(usbproxy-bm 86bfebe). Writing it in boot0's FEL path, with the BROM's
+I-cache and sunxi-fel's MMU live, wedged the FEL session (second power
+cycle of the evening); boot0 leaves ACTLR alone. The slow/stalling rounds
+are not yet explained: next is the same concurrent run under boot0 twice
+from a fresh boot, then if it still stalls the remaining candidates are
+the CCU security switch bits (cheap to set in boot0) and whatever the
+watch's adbd does after a long reboot soak.
+
+Still open: cold boots; the appliance unit's migration (`bm flash --boot0`
+from its running firmware); Thumb-2 for the firmware is a free 29 % if ever
+wanted.
 
 ## 9. Codex review (2026-10-09), triaged
 
