@@ -931,6 +931,27 @@ use p50/p90. Fix pending in trace.cpp.
   2 ms apart a few seconds after configuration: the Mac idling a device
   nobody has open yet and waking it as adb opens it, benign. Card:
   usbproxy-bm c77ece5.
+  **Codex review of the whole tree (19:00), 7 findings, 5 fixed, 1 dropped, 1
+  unproven** (usbproxy-bm 638f60c, on the card): (1) inner DMA channels
+  survived a USB bus reset (TinyUSB 0.21 closes endpoints only on
+  SET_CONFIGURATION): stopped in the reset handler now; verified with a
+  console `detach`/`attach` (Mac re-enumerates) followed by pushes that
+  still ran on DMA. (2) completed watch→Mac buffers the Mac had not read
+  survived an unbind and would have led the next device's CNXN reply:
+  dropped at unbind. (3) the console `detach` guard against the automatic
+  re-present had not landed: fixed, detach now holds (6 s test, Mac saw
+  "hardware connection lost", no re-present). (4) `log -f` could underflow
+  its byte count when the follower lagged a full ring: clamped. (5) the
+  watch→Mac payload length was clamped to 4096: the full length is kept
+  and read in 4 KiB pieces (legacy adbd never exceeds 4096, a newer one
+  would have broken framing on its first large WRTE). Dropped: the M1
+  loopback test mode and `tools/loopback.py` (its live flag could overflow
+  a buffer; nothing uses it). Unproven: an RX release that could discard a
+  fresh packet after a DMA completion; three 8 MB pushes with 2 KiB chunks
+  (each payload spanning two DMA reads) were md5-clean. After the fixes:
+  hostcycle 10/10, concurrent 5/5, fastboot 1/3 where the two failures
+  were narwhal booting into usb-moded's charging-only mode (18d1:0afe,
+  2 in 16 reboots today; a reseat clears it, as on Linux).
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
