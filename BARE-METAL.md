@@ -955,6 +955,28 @@ use p50/p90. Fix pending in trace.cpp.
   **Narwhal, 910 MB pull, direct vs through the firmware (19:15):** 2.9 MB/s
   direct, 2.7 MB/s through the appliance, i.e. 93%; the stamps predicted
   ~95% (63 µs of proxy legs in a 1.8 ms cycle owned by the watch's adbd).
+  **SPL→FEL retarget, verified (20:05, dev board, then documented for the
+  appliance unit).** U-Boot patch 0004: at the top of the SPL's
+  `board_init_f` (H3 only), RTC GP1 == 0xb0010fe1 (p-boot's / SUSE
+  `rbrom`'s magic) is cleared and the CPU jumps to the BROM FEL routine at
+  0xffff0020, after clearing SCTLR's alignment-check bit (sunxi-fel refuses
+  an SPL whose SCTLR is not the BROM's: "Unexpected SCTLR (00C5287A)" was
+  the first attempt). The firmware console gained `fel` (GP1 = that word,
+  watchdog reset) and `dfu` (GP0 = DFU1, so the SPL takes the U-Boot path
+  and boot.scr starts dfu-util mode without Linux). Result: `bm cmd fel` →
+  `sunxi-fel ver` = `AWUSBFEX soc=00001680(H3)` with the card in → `make
+  fel` (SPL + fw.bin over FEL, 949 kB/s) runs the firmware from RAM (`bm
+  check` PASS, entry 9.8 s = the FEL round trip) → `reboot` → normal Falcon
+  card boot (`bm check --adb` PASS). `make fel-reset` (a 24-byte watchdog
+  blob run over FEL) leaves FEL without touching the board. So FEL is now
+  the universal recovery and dev path on both units: no card pull, no
+  UART; U-Boot proper and the Linux fallback stay on the card only as
+  conveniences (DFU writes of the SPL/U-Boot itself; `bm flash-usb
+  --uboot` does that from either Linux or the firmware). Open item 3 of
+  the plan ("0xffff0020 unverified") is closed; the firmware-only card is
+  now a real option. The appliance unit still carries the pre-0004 SPL:
+  `bm cmd uboot` → Linux fallback → `bm flash-usb --uboot …` brings it up
+  to date.
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
