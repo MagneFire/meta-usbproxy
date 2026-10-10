@@ -843,7 +843,7 @@ use p50/p90. Fix pending in trace.cpp.
      that. Fix: invalidate each cut-through piece right before it is handed
      to the DCD (its DMA is done by then), and invalidate musb RX DMA ranges
      after completion for the framer's sake. 30/30 shell-loop runs clean
-     (usbproxy-bm, commit after c6f2f59). M3's "64–128 stale bytes at packet
+     (usbproxy-bm 95c4116). M3's "64–128 stale bytes at packet
      starts" fits this one even better than the FIFO bug.
   2. **Mac sleep looped the board.** This Mac sleeps after 1 min idle; when
      it did, the gadget logged `suspended`, then `resumed` 2 ms later with
