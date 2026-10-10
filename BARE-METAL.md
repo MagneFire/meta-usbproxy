@@ -867,6 +867,22 @@ use p50/p90. Fix pending in trace.cpp.
      Drops happened while the watch was still drawing its 500 mA charge
      current; once it reached termination the link held. Worth a look at
      the cradle plug and pins before the appliance unit.
+  4. **Fastboot through the cut-through path** (found with narwhal, 16:30):
+     `getvar all` failed with e00002e8 on the Mac's 64-byte response read
+     and stayed failed until a reseat. The fastboot slot's watch reads were
+     whole-buffer (4096), so the watch→Mac cut-through applied to it and
+     once forwarded a 512-byte piece, which the host's 64-byte read cannot
+     take. The fastboot slot now reads one watch packet at a time
+     (`want = wMaxPacketSize`, 512 here: a short reply still completes at
+     once) and so never enters the cut-through path. 10/10 fastboot cycles
+     after that (usbproxy-bm c0f05bb). Open: how 512 bytes "landed" on a reply
+     endpoint at all; the progress lookup is by (daddr, ep) and both slots
+     use 81/01 on these watches, so a lingering queue head from the device
+     that just left is the suspect, not proven.
+  **Narwhal vs catfish on the cradle question:** narwhal (charging at 85%,
+  same Mac-powered Zero, same soak) came back from 16 of 16 reboots in
+  25 s; catfish left the port after every reboot today. Whatever the
+  supply margin, catfish or its cradle is the larger part of it.
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
