@@ -916,6 +916,21 @@ use p50/p90. Fix pending in trace.cpp.
   rescan); cold power-on was never measured there. So the plug-in →
   enumeration path is ~0.85 s shorter and the watch binds without the
   settle debounce; adb's own rescan now dominates what the Mac user sees.
+  **14 cold power-ons with narwhal cradled (18:15–18:18, UART captured):**
+  no fault, so the 18:01 abort is 1 in 15 so far. Every boot shows the
+  same shape: gadget configured at 0.42–0.53 s; the watch's port connects
+  and drops within 4 ms at 0.68 s (the watch re-asserting its gadget as
+  VBUS returns), reconnects at ~1.8 s, bound at ~2.0 s. In four consecutive
+  boots the Mac never configured the gadget: its log shows the old device
+  object kept alive for a minute with transaction errors on EP0/EP1 every
+  second and no "hardware connection lost", so it never saw the power
+  cycle and never reset the new us. Fix: if the host has not configured
+  the gadget 2 s after connect, the firmware drops the pull-up for 100 ms
+  and presents itself again (`usb_represented=` in `status`; the console's
+  `detach` suspends it). Three later boots also show `suspended`/`resumed`
+  2 ms apart a few seconds after configuration: the Mac idling a device
+  nobody has open yet and waking it as adb opens it, benign. Card:
+  usbproxy-bm c77ece5.
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
