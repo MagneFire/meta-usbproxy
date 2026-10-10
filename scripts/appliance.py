@@ -59,8 +59,10 @@ import hashlib
 import os
 import pathlib
 import re
+import struct
 import subprocess
 import sys
+import zlib
 import time
 
 import applib as A
@@ -709,12 +711,117 @@ def cmd_soak(args):
 
 
 # --------------------------------------------------------------------------- #
-# bm: the bare-metal firmware (~/Downloads/usbproxy-bm), loaded over the UART
-# dongle through U-Boot proper (`loady` + `go`, nothing written) or written to
-# the card's Falcon kernel sector (`mmc write` + reset), then graded.
+# bm: the bare-metal firmware (~/Downloads/usbproxy-bm). Since boot0 replaced
+# the U-Boot SPL (2026-10-10) everything goes over FEL on the OTG cable: the
+# firmware's `fel` console command resets into the BROM's FEL mode, `sunxi-fel
+# spl boot0.bin` brings DRAM up and returns, then either the firmware runs from
+# RAM (`bm run`) or felflash.bin writes the card (`bm flash`). No UART, no
+# U-Boot. `bm flash-usb` (U-Boot DFU) stays for cards that still carry U-Boot.
 # --------------------------------------------------------------------------- #
 BM_LOAD = "0x40008000"
 BM_FIRST_PROMPT_S = 20
+FEL_BIN = os.path.expanduser("~/.local/bin/sunxi-fel")
+FEL_ID = "1f3a:efe8"
+FELFLASH_ADDR = 0x4ff00000      # ld/felflash.ld
+FELFLASH_CMD = 0x4ff10000       # src/felflash/main.c command block
+FELFLASH_DATA = 0x41000000      # data, then the readback right after it
+FELFLASH_MAGIC = 0x48534c46     # "FLSH"
+FELFLASH_STATUS = {0: "ok", 1: "bad magic", 2: "data crc (transfer)", 3: "mmc init",
+                   4: "write", 5: "readback", 6: "verify crc"}
+# tools/felreset.S: arm the watchdog for a whole-system reset (leaves FEL, card boots)
+FELRESET_BLOB = bytes.fromhex("0c009fe50110a0e3141080e5181080e5feffffeaa00cc201")
+FELRESET_ADDR = 0x2000
+BOOT0_SECTOR = 0x10
+
+
+def fel(*args, timeout=120):
+    r = subprocess.run([FEL_BIN, *args], capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def fel_present():
+    return fel("ver")[0] == 0
+
+
+def fel_wait(timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        if fel_present():
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def fel_request():
+    """Into FEL from a running firmware (its `fel`: GP1 request + watchdog
+    reset, boot0 jumps to the BROM). A board already in FEL is fine."""
+    if fel_present():
+        say("board is in FEL")
+        return
+    ser = A.open_serial(timeout=1.0)
+    node = ser.port
+    if not A.bm_confirm_prompt(ser):
+        ser.close()
+        fail(f"no `bm> ` prompt on {node} and no FEL device; a Linux card takes `bm flash-usb`")
+    ser.write(b"fel\n")
+    ser.flush()
+    ser.close()
+    say(f"asked the firmware (via {node}) for FEL; waiting for {FEL_ID}")
+    if not fel_wait(30):
+        fail("no FEL device within 30 s")
+
+
+def fel_write(addr, data, what):
+    LOGDIR.mkdir(parents=True, exist_ok=True)
+    tmp = LOGDIR / f"fel-{what}"
+    tmp.write_bytes(data)
+    t0 = time.time()
+    rc, out = fel("-p", "write", f"0x{addr:x}", str(tmp))
+    if rc != 0:
+        fail(f"sunxi-fel write of {what} failed:\n{out[-400:]}")
+    say(f"  {what}: {len(data)} bytes at 0x{addr:x} in {time.time() - t0:.1f} s")
+
+
+def fel_readl(addr):
+    rc, out = fel("readl", f"0x{addr:x}")
+    if rc != 0:
+        fail(f"sunxi-fel readl failed:\n{out[-200:]}")
+    return int(out.strip().split()[-1], 16)
+
+
+def fel_exe(addr):
+    rc, out = fel("exe", f"0x{addr:x}")
+    if rc != 0:
+        fail(f"sunxi-fel exe failed:\n{out[-200:]}")
+
+
+def fel_dram_up(boot0):
+    """`sunxi-fel spl boot0.bin`: boot0 sets the clocks and DRAM and returns."""
+    rc, out = fel("spl", str(boot0))
+    if rc != 0:
+        fail(f"sunxi-fel spl {boot0} failed:\n{out[-400:]}")
+    say(f"DRAM up via {boot0.name}")
+
+
+def fel_reset():
+    fel_write(FELRESET_ADDR, FELRESET_BLOB, "felreset")
+    fel("exe", f"0x{FELRESET_ADDR:x}")
+
+
+def fel_flash_region(felflash, sector, data, what):
+    """One felflash run: data + command block into DRAM, exe, status back."""
+    data = data + b"\0" * (-len(data) % 512)
+    crc = zlib.crc32(data) & 0xffffffff
+    fel_write(FELFLASH_DATA, data, what)
+    cmd = struct.pack("<7I", FELFLASH_MAGIC, sector, len(data) // 512, crc, FELFLASH_DATA, 0xffffffff, 0)
+    fel_write(FELFLASH_CMD, cmd, "cmd")
+    fel_exe(FELFLASH_ADDR)
+    st = fel_readl(FELFLASH_CMD + 0x14)
+    ms = fel_readl(FELFLASH_CMD + 0x18)
+    if st != 0:
+        fail(f"felflash: {what} at sector 0x{sector:x}: {FELFLASH_STATUS.get(st, st)} (status {st}); "
+             "the card may hold a partial image: fix and rerun (boot0 enters FEL on a bad image)")
+    say(f"  {what}: {len(data)} bytes written and verified at sector 0x{sector:x} in {ms} ms")
 
 
 def bm_grade(c, ser, text, expect_rev=None, want_watch=False):
@@ -855,44 +962,50 @@ def cmd_bm(args):
     p = pathlib.Path(args.rest[0])
     data = p.read_bytes()
     rev = bm_local_rev(p)
-    log = open_log(f"bm-{op}")
-    ser = A.open_serial(timeout=1.0)
-    if not A.ub_catch_prompt(ser):
-        fail("did not reach the U-Boot prompt")
-    say("at U-Boot prompt")
-    crc = A.ub_loady(ser, BM_LOAD, data, p.name, baud=args.baud or None, progress=say)
+    build = p.parent
+    boot0 = pathlib.Path(args.boot0_bin) if args.boot0_bin else build / "boot0.bin"
+    if not boot0.exists():
+        fail(f"{boot0}: not found (make boot0)")
+    if boot0.read_bytes()[4:12] != b"eGON.BT0":
+        fail(f"{boot0}: not an eGON.BT0 image")
     c = Check()
+    fel_request()
+    fel_dram_up(boot0)
     if op == "run":
         if "uimg" in p.name:
             fail("bm run takes the raw fw.bin (the uImage header would be executed)")
-        say(f"go {BM_LOAD}")
-        ser.reset_input_buffer()
-        ser.write(f"go {BM_LOAD}\n".encode())
-        ser.flush()
-        saved = ser.timeout
-        ser.timeout = 0.05
-        time.sleep(0.2)
-        ser.baudrate = A.BAUD   # the firmware re-inits UART0 at 115200
-        text, _ = A.read_until(ser, [A.BM_PROMPT], BM_FIRST_PROMPT_S, log=log)
-        ser.timeout = saved
+        fel_write(int(BM_LOAD, 16), data, p.name)
+        say(f"exe {BM_LOAD}")
+        fel_exe(int(BM_LOAD, 16))
     else:   # flash
-        if "uimg" not in p.name:
-            fail("bm flash takes the mkimage-wrapped fw.uimg (the SPL needs the legacy header)")
-        A.ub_raw_write(ser, BM_LOAD, A.KERNEL_SECTOR, data, crc, p.name, log=say)
-        text = A.ub_reset_and_watch(ser, timeout=BM_FIRST_PROMPT_S + 10, log_file=log)
-        r = A.boot_report(text)
-        c.add(r["falcon"], "SPL took the Falcon path", "")
-        c.add(r["dram_mib"] is not None, "SPL DRAM banner", f"{r['dram_mib']} MiB")
-    for l in text.replace("\r", "").splitlines()[-12:]:
-        say("  | " + l)
-    st = bm_grade(c, ser, text, expect_rev=rev, want_watch=args.adb)
+        if data[:4] != b"\x27\x05\x19\x56":
+            fail(f"{p}: not a U-Boot legacy uImage (make uimage)")
+        felflash = build / "felflash.bin"
+        if not felflash.exists():
+            fail(f"{felflash}: not found (make felflash)")
+        fel_write(FELFLASH_ADDR, felflash.read_bytes(), "felflash")
+        fel_flash_region(felflash, A.KERNEL_SECTOR, data, p.name)
+        if args.boot0:
+            # last, so an interrupted run leaves a boot0 the BROM rejects (-> FEL)
+            fel_flash_region(felflash, BOOT0_SECTOR, boot0.read_bytes(), boot0.name)
+        say("leaving FEL (watchdog reset)")
+        fel_reset()
+    node = wait_for_console("usbmodem")
+    if not node:
+        fail("no USB console within 90 s")
+    say(f"console back as {node}")
+    os.environ["PI_DEV"] = node
+    time.sleep(2)
+    ser = A.open_serial(timeout=1.0)
+    if not A.bm_confirm_prompt(ser):
+        fail("no `bm> ` prompt on the console")
+    st = bm_grade(c, ser, "usbproxy-bm bm> ", expect_rev=rev, want_watch=args.adb)
     if args.adb:
         c.add(adb_sees_device(), "adb sees the watch", "")
     ser.close()
     if op == "run":
-        say("RAM only: the card's own payload comes back on the next reset.")
+        say("RAM only: the card's own image comes back on the next reset.")
     sys.exit(0 if c.report() else 1)
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -933,10 +1046,11 @@ def main():
     p.add_argument("--power-cmd", help="command that cycles the supply, for --cold")
     p.set_defaults(fn=cmd_soak)
 
-    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | flash-usb <fw.uimg> (no UART: via the Linux console + DFU) | check | cmd <text> | log [bytes] | log -f")
+    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm), over FEL: run <fw.bin> (RAM only) | flash <fw.uimg> [--boot0] | flash-usb <fw.uimg> (U-Boot DFU, legacy cards) | check | cmd <text> | log [bytes] | log -f")
     p.add_argument("op", choices=["run", "flash", "flash-usb", "check", "cmd", "log"])
     p.add_argument("rest", nargs="*")
-    p.add_argument("--baud", type=int, default=750000, help="Y-modem rate (default 750000; 0 = stay at 115200)")
+    p.add_argument("--boot0", action="store_true", help="with `flash`: also write boot0.bin to sector 16 (after the firmware)")
+    p.add_argument("--boot0-bin", help="boot0 image for the FEL DRAM init and --boot0 (default: boot0.bin next to the firmware file)")
     p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for `cmd` output")
     p.add_argument("--adb", action="store_true")
     p.add_argument("-f", "--follow", action="store_true", help="with `log`: stream the firmware log until Ctrl-C")
