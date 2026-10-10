@@ -1102,11 +1102,13 @@ does *not* select SPL_ARMV7_SET_CORTEX_SMPEN, so it is not the SPL/boot0
 difference either) — the firmware now sets it with the caches off
 (usbproxy-bm 86bfebe). Writing it in boot0's FEL path, with the BROM's
 I-cache and sunxi-fel's MMU live, wedged the FEL session (second power
-cycle of the evening); boot0 leaves ACTLR alone. The slow/stalling rounds
-are not yet explained: next is the same concurrent run under boot0 twice
-from a fresh boot, then if it still stalls the remaining candidates are
-the CCU security switch bits (cheap to set in boot0) and whatever the
-watch's adbd does after a long reboot soak.
+cycle of the evening); boot0 leaves ACTLR alone. **That was it:** with ACTLR.SMP set by
+the firmware, boot0-booted concurrent rounds run 5/5 at 3.4 s, twice, the
+second from a fresh reboot (how the SPL path got away without it is not
+understood; U-Boot proper's `go` boots of the early days did set it, the
+SPL's Falcon jump apparently left something equivalent behind). Lesson for
+any bare-metal entry on this core: set SMP with the caches off before
+enabling them, never from a FEL-loaded program.
 
 Still open: cold boots; the appliance unit's migration (`bm flash --boot0`
 from its running firmware); Thumb-2 for the firmware is a free 29 % if ever
