@@ -14,10 +14,14 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 # (U-Boot proper only on a pending UART byte, the DFU1 RTC flag, or a raw
 # kernel region that is not a Linux image) plus the pre-jump hook that sets
 # CNTFRQ and arms the watchdog. The CONFIG side is in usbproxy-uboot.cfg.
+# 0004-sunxi-spl-fel-request: RTC GP1 = 0xb0010fe1 at reset sends the SPL
+# into the BROM FEL routine (the firmware console `fel`): USB recovery
+# without pulling the card.
 SRC_URI:append = " \
     file://0001-sunxi-dw-dram-use-pattern-based-size-detection.patch \
     file://0002-sunxi-board-usb-init-probe-musb-gadget.patch \
     file://0003-sunxi-spl-falcon-boot.patch \
+    file://0004-sunxi-spl-fel-request.patch \
     file://usbproxy-uboot.cfg \
     file://usbproxy-boot.cmd \
 "

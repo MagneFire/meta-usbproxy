@@ -791,13 +791,33 @@ def cmd_bm(args):
         data = pathlib.Path(args.rest[0]).read_bytes()
         if data[:4] != b"\x27\x05\x19\x56":
             fail(f"{args.rest[0]}: not a U-Boot legacy uImage")
+        uboot = pathlib.Path(args.uboot).read_bytes() if args.uboot else None
+        if uboot and uboot[4:12] != b"eGON.BT0":
+            fail(f"{args.uboot}: not a sunxi SPL image (no eGON.BT0 header)")
         if dfu_present():
             say("board is already in DFU mode")
         else:
-            node = request_flash_mode()
+            ser = A.open_serial(timeout=1.0)
+            if A.bm_confirm_prompt(ser):
+                # the firmware is running: its `dfu` sets GP0=DFU1 and resets
+                node = ser.port
+                ser.write(b"dfu\n")
+                ser.flush()
+                ser.close()
+            else:
+                ser.close()
+                node = request_flash_mode()
             say(f"asked the board (via {node}) to reboot into DFU; waiting for {DFU_ID}")
             if not dfu_wait(60):
                 fail("no DFU device within 60 s")
+        if uboot:
+            want = A.crc32_of(uboot)
+            say(f"raw u-boot (SPL+U-Boot): sending {len(uboot)} bytes crc {want}")
+            dfu_download(DFU_UBOOT_ALT, uboot, "u-boot (raw, SPL+U-Boot)")
+            back = dfu_upload(DFU_UBOOT_ALT, size=DFU_UBOOT_RAW_BYTES)[:len(uboot)]
+            if A.crc32_of(back) != want:
+                fail("u-boot readback mismatch; do NOT power off, rerun with --uboot")
+            say("raw u-boot verified by readback")
         want = A.crc32_of(data)
         say(f"raw kernel: sending {len(data)} bytes crc {want}")
         dfu_download("kernel", data, "kernel (raw, firmware uImage)")
@@ -920,6 +940,7 @@ def main():
     p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for `cmd` output")
     p.add_argument("--adb", action="store_true")
     p.add_argument("-f", "--follow", action="store_true", help="with `log`: stream the firmware log until Ctrl-C")
+    p.add_argument("--uboot", help="with `flash-usb`: also write this u-boot-sunxi-with-spl.bin (SPL+U-Boot) via DFU")
     p.set_defaults(fn=cmd_bm)
 
     args = ap.parse_args()

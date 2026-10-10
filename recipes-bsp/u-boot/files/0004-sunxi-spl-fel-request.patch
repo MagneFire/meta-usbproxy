@@ -1,0 +1,54 @@
+From: Darrel Griet <dgriet@gmail.com>
+Subject: [PATCH] sunxi: spl: enter BROM FEL on the usbproxy RTC GP1 request
+
+The bare-metal firmware writes 0xb0010fe1 into RTC GP1 and resets; the
+SPL jumps to the BROM FEL routine at 0xffff0020 before clocks or DRAM
+(the p-boot / SUSE rbrom mechanism, H3 only): USB recovery of a firmware
+board without pulling the card. The flag is cleared before the jump,
+and SCTLR's alignment-check bit with it (sunxi-fel checks the BROM state).
+
+Upstream-Status: Inappropriate [appliance-specific]
+---
+--- a/arch/arm/mach-sunxi/board.c
++++ b/arch/arm/mach-sunxi/board.c
+@@ -455,10 +455,40 @@
+ 	return result;
+ }
+ 
++/*
++ * usbproxy: a FEL request. The appliance firmware writes this word into RTC
++ * GP1 and resets; the SPL then hands the CPU to the BROM's FEL routine
++ * before touching clocks or DRAM, so the board shows up as a FEL device on
++ * the OTG port without pulling the card. Same magic and entry as p-boot and
++ * SUSE's U-Boot `rbrom` command (H3 only). Cleared first: a failed jump
++ * must not loop.
++ */
++#define USBPROXY_RTC_FEL_FLAG	(SUNXI_RTC_BASE + 0x104)	/* GP1 */
++#define USBPROXY_FEL_MAGIC	0xb0010fe1
++#define SUNXI_FEL_ENTRY		0xffff0020
++
+ void board_init_f(ulong dummy)
+ {
+ 	sunxi_sram_init();
+ 
++#ifdef CONFIG_MACH_SUN8I_H3
++	if (readl(USBPROXY_RTC_FEL_FLAG) == USBPROXY_FEL_MAGIC) {
++		u32 sctlr;
++
++		writel(0, USBPROXY_RTC_FEL_FLAG);
++		/*
++		 * sunxi-fel refuses to run an SPL unless SCTLR looks like the
++		 * BROM left it: the start code's alignment check (bit 1) must
++		 * go ("Unexpected SCTLR (00C5287A)" otherwise).
++		 */
++		asm volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
++		sctlr &= ~(1u << 1);
++		asm volatile("mcr p15, 0, %0, c1, c0, 0" :: "r"(sctlr));
++		asm volatile("isb");
++		((void (*)(void))SUNXI_FEL_ENTRY)();
++	}
++#endif
++
+ #if defined CONFIG_MACH_SUN6I || defined CONFIG_MACH_SUN8I_H3
+ 	/* Enable non-secure access to some peripherals */
+ 	tzpc_init();
