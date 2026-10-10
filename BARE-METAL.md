@@ -690,6 +690,49 @@ use p50/p90. Fix pending in trace.cpp.
   physically dropped off the cradle twice this session — Linux on the card
   sees only root hubs in that state, which is how to tell it from firmware.
 
+- **M3, the two follow-ups (2026-10-10, 08:00–09:00, usbproxy-bm → 'M3:
+  watch->Mac cut-through, musb inner DMA').** Result: **pull 6.2–6.3 MB/s
+  (0.65 ms) steady; push 5.8–7.0 MB/s warm (0.59–0.71 ms)**, 4.3 on the first
+  run after the watch has idled. Direct 7.8/7.2. Both deliverables built;
+  one of them turned out not to be the lever:
+  - *Cut-through, watch→Mac* (pull 5.75 → 6.2): packets of an in-flight
+    EHCI IN read are forwarded to the Mac as they land, using the QH
+    overlay's remaining-byte count, held one packet behind. Two traps: the
+    qTD slot is reused, so a matching current-qTD pointer still describes
+    the *previous* transfer until the HC fetches the new one (4 KiB of stale
+    data went out); and the overlay count runs ahead of the data in DRAM —
+    64–128 stale bytes at packet starts, tapering with offset, md5 mismatch —
+    so the newest packet is never touched. Delivery leg 97 → 25 µs.
+  - *Cut-through, Mac→watch*: built, measured, **off**. Forwarding each
+    512 B packet as its own EHCI OUT made the watch's OKAY arrive ~200 µs
+    later (sent→OKAY 378 → 579 µs); the watch's UDC likes bursts. Store-and-
+    forward of whole 4 KiB messages is faster for push.
+  - *musb inner DMA* (Allwinner USB DMA, 8 channels at +0x500/+0x540; CSR
+    sequences from the vendor `usbc_dev.c`): works (30 k transfers,
+    md5-exact, short-packet abort via the residual count) but **moves no
+    latency**: the Mac's 4 KiB still arrives in ~215 µs (≈100 µs is the
+    Mac's own gap between its header and payload writes, the rest ~12–15 µs
+    per packet of host pacing — the inter-packet histogram shows most gaps
+    under 20 µs with PIO too). RX DMA stays on for the CPU it frees; TX DMA
+    was slower than PIO (137 vs 99 µs per 4 KiB) and is off.
+  - EHCI NAK reload 0 vs 4 (live knob): no difference.
+  Where the cycle is now (warm watch, µs, chunk 4096): push 215 arrival +
+  122 delivery + 243 watch + 16 → 585–705 depending on the watch's mood;
+  pull 182 arrival (watch pace) + 26 delivery + 140 Mac + 22 → 650, with
+  the watch's own send turnaround ≈290. **The watch's state is now the
+  largest variable**: the first run after idle sees its USB acceptance and
+  turnaround slow 2–5× (one run: 2.2/2.5 MB/s), then it settles. Direct
+  would see the same, and the M-1 direct numbers were warm.
+  What is left to close, honestly: the proxy's irreducible cost is one
+  packet time plus a hop per direction (~20–30 µs per leg), which is where
+  the pull side now is. Push still carries the whole-message store-and-
+  forward (~100 µs of arrival the watch would otherwise overlap) because
+  the watch punishes per-packet delivery; the middle ground — forward in
+  2 KiB halves once 2 KiB have landed (cut-through with a 2 KiB floor rather
+  than per packet) — is untested and is the last mechanical step. Beyond
+  that only the accelerator (local OKAY) beats direct, which is exactly what
+  the bare-metal spike set out not to need.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
