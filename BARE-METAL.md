@@ -891,7 +891,20 @@ use p50/p90. Fix pending in trace.cpp.
   --adb` PASS after it. Still owed: cold boots, unplug mid-push/mid-pull,
   Mac sleep/resume by hand, FEL recovery, the catfish `fastboot boot` of
   the AsteroidOS image (catfish needs a cradle that holds first), then the
-  repaired appliance unit. The card carries usbproxy-bm 37476f6.
+  repaired appliance unit. The card carries usbproxy-bm 28b8b14 (see finding 5).
+  5. **Cold power-on data abort (18:01, once).** Plugging the rig in with the
+     watch cradled: the first boot died at 0.553 s, right after the Mac
+     configured the gadget, in `dcache_invalidate_range(0x60190000, 32)`:
+     a 32-byte invalidate (sizeof a qTD) on an address outside DRAM, i.e. a
+     wild attached-qTD pointer in the EHCI poll; the watchdog's second boot
+     was clean. Not reproduced yet. `.dma` was NOLOAD and never zeroed
+     (ehci_init does clear its own pool, so this is hygiene rather than
+     the proven cause); it is zeroed in start.S now. The fault record now
+     also carries the interrupted mode's lr/sp and 32 stack words (verified
+     with the console's `panic`), so the next one gives a backtrace via
+     addr2line. Owed: the 20 cold boots of the hands-on list, with the UART
+     captured. The card carries usbproxy-bm 28b8b14 (also: PA17 is the red
+     status LED, PL10 the green power LED; names fixed).
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
