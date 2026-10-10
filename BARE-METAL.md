@@ -952,6 +952,9 @@ use p50/p90. Fix pending in trace.cpp.
   hostcycle 10/10, concurrent 5/5, fastboot 1/3 where the two failures
   were narwhal booting into usb-moded's charging-only mode (18d1:0afe,
   2 in 16 reboots today; a reseat clears it, as on Linux).
+  **Narwhal, 910 MB pull, direct vs through the firmware (19:15):** 2.9 MB/s
+  direct, 2.7 MB/s through the appliance, i.e. 93%; the stamps predicted
+  ~95% (63 µs of proxy legs in a 1.8 ms cycle owned by the watch's adbd).
   Also found: the Mac's own kernel panic at 15:03 (AppleCentauriManager,
   Apple's Wi‑Fi/Bluetooth coprocessor driver, "wait for termination failed
   … 65s") had nothing to do with the gadget, which sits on usb-drd0.
