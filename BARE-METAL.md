@@ -832,6 +832,19 @@ use p50/p90. Fix pending in trace.cpp.
      motivated the one-packet cut-through lag was very likely this same
      bug; the lag stays as margin (~10 µs per message), `cutlag`/`cutcanary`
      knobs allow revisiting.
+     **Second mechanism, same 64-byte signature** (the soak's shell loop on
+     top of push+pull still corrupted 1 pull in 10 after the FIFO fix; 0 in
+     20 without the loop): the stale bytes were a cache line's image of an
+     older w2h buffer, read by the musb PIO from the core's cache instead
+     of DRAM. The bridge buffers are cached and contiguous, and the PIO copy
+     loop's last iteration speculatively loads one word past the piece it
+     copies, so the first line of the *next* buffer lands in cache before
+     the EHCI has written it; the submit-time invalidate cannot help with
+     that. Fix: invalidate each cut-through piece right before it is handed
+     to the DCD (its DMA is done by then), and invalidate musb RX DMA ranges
+     after completion for the framer's sake. 30/30 shell-loop runs clean
+     (usbproxy-bm, commit after c6f2f59). M3's "64–128 stale bytes at packet
+     starts" fits this one even better than the FIFO bug.
   2. **Mac sleep looped the board.** This Mac sleeps after 1 min idle; when
      it did, the gadget logged `suspended`, then `resumed` 2 ms later with
      no SOFs following, so `tud_suspended()` was false, the progress gate
