@@ -762,6 +762,32 @@ use p50/p90. Fix pending in trace.cpp.
   restarts — exactly the halt pulse + CNXN replay of M4a. The cold power-on
   Falcon boot still needs a hand on the cable; the card holds this build.
 
+- **M4a, the semantics (2026-10-10, 09:45–10:15, usbproxy-bm f5eea39 →
+  4106fd4).** `bridge.cpp`'s host-stream framer, idle sink, CNXN
+  capture/replay and IN-only halt pulse ported into `bridge.c` (one decision
+  per gadget read; CNXN kept only if its checksum holds; replay at once if
+  captured while idle, else 500 ms after the bind; halts cleared only when
+  set). Two things the Linux version never had to know:
+  - *macOS adb needs two STALLs.* It clears a stalled pipe host-side (IOKit
+    `ClearPipeStall`, nothing on the bus) and retries once; only the retry
+    failing drops the transport. TinyUSB's sunxi DCD cleared SEND_STALL in
+    the SENTSTALL interrupt, so a halt stalled exactly one transaction and
+    the pulse never kicked anything (`adb reboot` hung, `device` listed with
+    no watch). Fixed: SENT_STALL is acknowledged, the halt persists until
+    `dcd_edpt_clear_stall()`, which now also resets the data toggle (USB
+    9.4.5, as Linux musb does).
+  - Nothing else: the framer, replay and pulse behaved as on Linux,
+    including the double kick (two CNXNs captured idle 1 s apart).
+  Verified, all with one adb server left running: boot → `device` via
+  replay; 5 software detach/attach cycles with `adb shell` after each;
+  `adb reboot` returns in 0.1 s, `offline` within 1.6 s, `device` + shell
+  49 s later (the watch's boot) via the captured CNXN; `adb reboot
+  bootloader` → `fastboot devices` lists USBPROXYBM, the parked `getvar`
+  (14 bytes) delivered at the fastboot bind, `getvar product` = catfish,
+  `getvar all`, `fastboot reboot`, adb back 81 s later. The fastboot slot is
+  never halted. Mac→watch cut-through is gated on an accepted message so it
+  can never leak bytes the framer drops.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
