@@ -746,6 +746,22 @@ use p50/p90. Fix pending in trace.cpp.
   time plus one hop each). First-run-after-idle cold watch: 2–5× slower,
   independent of the proxy.
 
+- **M2 exit items (2026-10-10, 09:10–09:40).** `bm flash fw.uimg` puts the
+  firmware at sector 0x18800; the SPL takes the Falcon path and the firmware
+  is at its prompt 179 ms after the SPL's jump stamp, watch at 480 Mb/s,
+  `adb devices` → `device`. Five warm reboots (`reboot` → watchdog → SPL →
+  Falcon) all came back the same way. Software attach/detach (`hostcycle N`
+  = unmount + re-enumerate): 30 cycles, 30 re-binds, 0 failures; one cycle
+  fired 0.7 s into a 10 MB push: the transfer aborted, the watch re-bound
+  230 ms later, no fault record. Bug found on the way: TinyUSB's
+  `async_advance_isr` frees a removed QH but not the qTD still attached to
+  it (the pending IN read), one leak per unplug until `qtd_find_free()`
+  failed and every submit on the next device failed — fixed in the fork.
+  Expected and still open: after a cycle the Mac's adb transport is stale
+  (the new adbd waits for a CNXN the Mac will not resend) until the server
+  restarts — exactly the halt pulse + CNXN replay of M4a. The cold power-on
+  Falcon boot still needs a hand on the cable; the card holds this build.
+
 ## 9. Codex review (2026-10-09), triaged
 
 Prompted with the whole document and read-only access to both repos; it
