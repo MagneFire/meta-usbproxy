@@ -781,6 +781,43 @@ def cmd_bm(args):
             return
         print(A.bm_run(ser, f"log {args.rest[0] if args.rest else 4096}", timeout=10))
         return
+    if op == "flash-usb":
+        # No UART on the appliance unit: ask the running Linux appliance (USB
+        # console) for DFU mode and write the firmware uImage into the SPL's
+        # Falcon kernel sectors (raw alt "kernel", 0x18800). U-Boot proper, the
+        # FAT files and the Linux fallback stay as they are.
+        if not args.rest:
+            fail("usage: bm flash-usb <fw.uimg>")
+        data = pathlib.Path(args.rest[0]).read_bytes()
+        if data[:4] != b"\x27\x05\x19\x56":
+            fail(f"{args.rest[0]}: not a U-Boot legacy uImage")
+        if dfu_present():
+            say("board is already in DFU mode")
+        else:
+            node = request_flash_mode()
+            say(f"asked the board (via {node}) to reboot into DFU; waiting for {DFU_ID}")
+            if not dfu_wait(60):
+                fail("no DFU device within 60 s")
+        want = A.crc32_of(data)
+        say(f"raw kernel: sending {len(data)} bytes crc {want}")
+        dfu_download("kernel", data, "kernel (raw, firmware uImage)")
+        back = dfu_upload("kernel", size=len(data))[:len(data)]
+        if len(back) != len(data) or A.crc32_of(back) != want:
+            fail("raw kernel readback mismatch; rerun")
+        say("raw kernel verified by readback; leaving DFU (reset)")
+        dfu_download("kernel", data, "kernel (reset vehicle)", reset=True)
+        back_node = wait_for_console("usbmodem")
+        if not back_node:
+            fail("no USB console within 90 s after the reset")
+        say(f"console back as {back_node}")
+        os.environ["PI_DEV"] = back_node
+        time.sleep(2)
+        c = Check()
+        ser = A.open_serial(timeout=1.0)
+        if not A.bm_confirm_prompt(ser):
+            fail("no `bm> ` prompt on the console after the flash")
+        bm_grade(c, ser, "usbproxy-bm bm> ", expect_rev=bm_local_rev(args.rest[0]), want_watch=args.adb)
+        sys.exit(0 if c.report() else 1)
     if op == "check":
         c = Check()
         ser = A.open_serial(timeout=1.0)
@@ -876,8 +913,8 @@ def main():
     p.add_argument("--power-cmd", help="command that cycles the supply, for --cold")
     p.set_defaults(fn=cmd_soak)
 
-    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | check | cmd <text> | log [bytes] | log -f")
-    p.add_argument("op", choices=["run", "flash", "check", "cmd", "log"])
+    p = sub.add_parser("bm", help="bare-metal firmware (usbproxy-bm): run <fw.bin> | flash <fw.uimg> | flash-usb <fw.uimg> (no UART: via the Linux console + DFU) | check | cmd <text> | log [bytes] | log -f")
+    p.add_argument("op", choices=["run", "flash", "flash-usb", "check", "cmd", "log"])
     p.add_argument("rest", nargs="*")
     p.add_argument("--baud", type=int, default=750000, help="Y-modem rate (default 750000; 0 = stay at 115200)")
     p.add_argument("--timeout", type=float, default=3.0, help="seconds to wait for `cmd` output")
