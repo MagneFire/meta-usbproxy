@@ -374,8 +374,8 @@ both stacks have them. Pin the stack commit.
 ## 6. Variants considered and parked
 
 - **SRAM-only firmware (no U-Boot at all).** *Ruled out 2026-10-10: the
-  EHCI cannot address SRAM A1, C or A2 at all (§8c). The "own boot0" half
-  of this idea is what shipped, with DRAM.* Own eGON boot0, no DRAM
+  EHCI cannot address SRAM A1, C or A2 at all (§8c), and "drop DMA" is
+  not a way around it: the EHCI is the DMA (2026-10-11, §8c).* Own eGON boot0, no DRAM
   init, firmware in the 108 KiB of contiguous SRAM. Removes most of the
   SPL's ~0.11 s of retained work and the DRAM flakiness class entirely,
   and the SPL's DRAM code is the only thing the SPL still contributes.
@@ -390,9 +390,10 @@ both stacks have them. Pin the stack commit.
   0x18800, and the GP1/RTC-stamp logic is ~20 lines. Own-boot0-with-DRAM
   = U-Boot's `dram_sunxi_dw.c` + H3 tables + our size test (~1200 lines,
   GPL) plus a PIO MMC read; own-boot0-without-DRAM = the SRAM variant.
-  The one decision to take now so that the SRAM variant stays open: keep
+  ~~The one decision to take now so that the SRAM variant stays open: keep
   the firmware's RAM footprint under ~70 KiB (EHCI pool, rings, no large
-  log ring) and put DRAM addresses only in the linker script.
+  log ring) and put DRAM addresses only in the linker script.~~ Dropped
+  2026-10-11: no constraint on the footprint, DRAM is permanent.
 - **U-Boot proper as the runtime.** Its musb gadget is proven here, but its
   host stack is synchronous; writing an async EHCI path inside U-Boot is
   the same work as the bare-metal one with a worse build system.
@@ -1013,6 +1014,32 @@ Verdict: the EHCI (and so the whole datapath) cannot reach SRAM; an
 SRAM-only firmware would still need DRAM for every buffer. The fallback
 branch of the plan applies: our own first stage with the DRAM init ported,
 firmware unchanged in DRAM.
+
+**Could the firmware drop DMA to make SRAM-only viable? (2026-10-11.) No.**
+The firmware has two DMA users and they are not alike. The *musb inner
+DMA* (gadget side, RX only; TX was slower than PIO and is off) is optional:
+`dma 0` runs the gadget fully by PIO as M1–M3 did, at ~10 µs of CPU per
+512 B packet and no throughput change (§8b: the DMA "moves no latency").
+The *EHCI* is not optional and is not a DMA *option*: an EHCI host
+controller fetches its frame list, queue heads and qTDs from memory and
+moves every data byte itself; there is no PIO or FIFO mode in the spec or
+in the H3's block. The USB-A port has no other controller but OHCI1 (the
+same list-driven bus-master design, and full speed only, 12 Mb/s). The one
+PIO-capable host on the SoC is the musb in host mode, which sits on the
+OTG port and is the only device-capable controller: using it for the watch
+leaves nothing to present the gadget to the Mac. So every byte of the host
+datapath (schedule + the bridge buffers, 66 KiB today) must live where the
+EHCI can reach it, and the probes above say that is DRAM. A hybrid (code
+and stacks in SRAM, EHCI pool and bridge buffers in DRAM) still needs the
+DRAM init and keeps the DRAM risk class, and gains nothing measurable:
+with the caches on, code runs at the same speed from either, and DRAM init
+is 15 ms of a 189 ms boot (the BROM alone is 114 ms). For the record the
+firmware would not fit either: text+data 59 KiB (42 with Thumb-2), .bss
+76 KiB of which the bridge slots are 66, stacks 15, MMU table 16, EHCI
+pool 8 — ~171 KiB without the log ring, against 108 KiB of A1+C (0–0x7FFF
+is the BROM/FEL area and boot0's image) plus 32 KiB of A2. SRAM-only is
+closed, not parked. If DRAM *robustness* was the motive, the lever is in
+boot0 (a write/read-back test after init → FEL with GP3 why 3), not SRAM.
 
 **boot0 (usbproxy-bm 8a3bee8+, `src/boot0/`, `src/h3/{clock,dram,mmc}.c`,
 `src/lib/crc32.c`, `ld/boot0.ld`, `tools/egon.py`).** 16 KiB eGON.BT0 image
